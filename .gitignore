@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# Java / Maven
+MiniCPBP/target/
+*.class
+
+# Experiment outputs (generated, not versioned)
+experiment_results/cache/
+results/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
