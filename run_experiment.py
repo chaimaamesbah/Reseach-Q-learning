@@ -1,14 +1,18 @@
 """
-run_experiment.py — Lance et agrège des expériences FrozenLake CP reward-shaping
+run_experiment.py — Lance et agrège des expériences Q-learning
 sur plusieurs instances, méthodes et seeds.
 
 Usage:
     python run_experiment.py [options]
 
+Navigation:
+    python run_experiment.py --domain navigation --instances 1 \
+        --methods q-none q-cp-etr --episodes 500 --seeds 5
+
 Options:
     --episodes N        Training episodes per run          (default: 2000)
     --seeds N           Number of seeds, starting at 1    (default: 5)
-    --instances ID...   Instance IDs to benchmark         (default: 4s 4medium 4hard 8s 8medium 8hard)
+    --instances ID...   Instance IDs to benchmark
     --methods M...      Methods to benchmark              (default: all six)
     --output-dir DIR    Directory for all outputs         (default: ./experiment_results)
     --workers N         Parallel workers (default: 1). Java methods utilisent un port dédié par worker.
@@ -26,7 +30,7 @@ Methods:
 Cache:
     After each successful run, the script writes a compact JSON to
     experiment_results/cache/{inst}_{method}_seed{seed}_{episodes}eps.json
-    containing just the eval_log, final_sr and final_dr.
+    containing the eval_log, episode_log, final_sr and final_dr.
     The results/ folder written by main.py is never read for skip logic.
 """
 
@@ -191,7 +195,7 @@ def _save_cache(output_dir: Path, inst: str, meth: str, seed: int,
 # Result extraction helpers
 # ---------------------------------------------------------------------------
 
-def _extract_entry(log: dict) -> dict | None:
+def _extract_entry(log: dict, domain: str = "frozenlake") -> dict | None:
     """Pull the fields we care about out of a main.py result JSON."""
     eval_log = log.get("evaluation_log", [])
     if not eval_log:
@@ -199,6 +203,7 @@ def _extract_entry(log: dict) -> dict | None:
     last = eval_log[-1]
     return {
         "eval_log": eval_log,
+        "episode_log": log.get("episode_log", []),
         "final_sr": last.get("eval_success_rate", float("nan")),
         "final_dr": last.get("eval_avg_discounted_return", float("nan")),
     }
@@ -226,11 +231,14 @@ def _budget_stage_changes(meth: str, episodes: int) -> list[int]:
 # ---------------------------------------------------------------------------
 
 def _build_cmd(meth: str, inst: str, episodes: int, seed: int, tmp_dir: str,
-               port: int = 12345, no_compile: bool = False) -> list[str]:
+               domain: str = "frozenlake", alpha: float = 40.0,
+               bp_iter: int = 1, port: int = 12345,
+               no_compile: bool = False) -> list[str]:
     base, budget, strategy = _parse_method(meth)
     agent, shaping = METHOD_ARGS[base]
     cmd = [
         sys.executable, str(ROOT / "main.py"),
+        "--domain", domain,
         "--instance", inst,
         "--agent", agent,
         "--seed", str(seed),
@@ -241,6 +249,8 @@ def _build_cmd(meth: str, inst: str, episodes: int, seed: int, tmp_dir: str,
         cmd += ["--episodes", str(episodes)]
     if shaping is not None:
         cmd += ["--shaping", shaping]
+    if domain == "navigation" and shaping == "cp-etr":
+        cmd += ["--alpha", str(alpha), "--bp-iter", str(bp_iter)]
     if budget:
         cmd += ["--budget", str(budget)]
     if strategy:
@@ -258,6 +268,8 @@ def _build_cmd(meth: str, inst: str, episodes: int, seed: int, tmp_dir: str,
 
 def _run_one(inst: str, meth: str, seed: int, episodes: int,
              output_dir: Path, tag: str, print_lock: threading.Lock,
+             domain: str = "frozenlake", alpha: float = 40.0,
+             bp_iter: int = 1,
              port: int = 12345, no_compile: bool = False,
              progress_bar: "tqdm | None" = None) -> tuple[tuple, dict | None]:
     """Execute a single (inst, meth, seed) run and return ((inst, meth, seed), entry)."""
@@ -271,7 +283,10 @@ def _run_one(inst: str, meth: str, seed: int, episodes: int,
         return (inst, meth, seed), entry
 
     try:
-        cmd = _build_cmd(meth, inst, episodes, seed, tmp_dir, port=port, no_compile=no_compile)
+        cmd = _build_cmd(
+            meth, inst, episodes, seed, tmp_dir, domain=domain,
+            alpha=alpha, bp_iter=bp_iter, port=port, no_compile=no_compile,
+        )
         result = subprocess.run(
             cmd, cwd=str(ROOT), capture_output=True, text=True, timeout=7200,
         )
@@ -287,7 +302,7 @@ def _run_one(inst: str, meth: str, seed: int, episodes: int,
         with open(result_files[0]) as f:
             raw = json.load(f)
 
-        entry = _extract_entry(raw)
+        entry = _extract_entry(raw, domain=domain)
         if entry is None:
             return _done(f"  [WARN]  {tag} — result log has no evaluation_log", None)
 
@@ -351,7 +366,9 @@ def _precompile_java(print_lock: threading.Lock) -> bool:
 
 
 def run_all(instances, methods, seeds, episodes, output_dir, force,
-            workers: int = 1, base_port: int = 12345) -> dict:
+            domain: str = "frozenlake", alpha: float = 40.0,
+            bp_iter: int = 1, workers: int = 1,
+            base_port: int = 12345) -> dict:
     """
     Launch main.py for each (instance, method, seed) not already cached.
 
@@ -412,13 +429,19 @@ def run_all(instances, methods, seeds, episodes, output_dir, force,
         if base in JAVA_METHODS:
             port = port_pool.get()
             try:
-                return _run_one(inst, meth, seed, episodes, output_dir, tag, print_lock,
-                                port=port, no_compile=no_compile, progress_bar=pbar)
+                return _run_one(
+                    inst, meth, seed, episodes, output_dir, tag, print_lock,
+                    domain=domain, alpha=alpha, bp_iter=bp_iter,
+                    port=port, no_compile=no_compile, progress_bar=pbar,
+                )
             finally:
                 port_pool.put(port)
         else:
-            return _run_one(inst, meth, seed, episodes, output_dir, tag, print_lock,
-                            progress_bar=pbar)
+            return _run_one(
+                inst, meth, seed, episodes, output_dir, tag, print_lock,
+                domain=domain, alpha=alpha, bp_iter=bp_iter,
+                progress_bar=pbar,
+            )
 
     if pending and workers > 1:
         with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -545,7 +568,7 @@ def make_summary_table(data: dict, instances, methods, seeds, output_dir: Path) 
 # ---------------------------------------------------------------------------
 
 def make_learning_curves(data: dict, instances, methods, seeds, episodes: int,
-                         output_dir: Path) -> None:
+                         output_dir: Path, domain: str = "frozenlake") -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     plt.style.use("seaborn-v0_8-darkgrid")
 
@@ -581,8 +604,16 @@ def make_learning_curves(data: dict, instances, methods, seeds, episodes: int,
                 entry = data.get((inst, meth, seed))
                 if entry is None:
                     continue
-                eps = [e["training_episode"] for e in entry["eval_log"]]
-                srs = [e.get("eval_success_rate", float("nan")) for e in entry["eval_log"]]
+                if domain == "navigation":
+                    # Navigation curves use the raw environment return per
+                    # episode, matching the PPO learning-curve convention.
+                    logs = entry.get("episode_log", [])
+                    eps = [e["episode"] for e in logs]
+                    srs = [e.get("env_reward", float("nan")) for e in logs]
+                else:
+                    eps = [e["training_episode"] for e in entry["eval_log"]]
+                    srs = [e.get("eval_success_rate", float("nan"))
+                           for e in entry["eval_log"]]
                 seed_curves[seed] = (eps, srs)
 
             if not seed_curves:
@@ -599,7 +630,7 @@ def make_learning_curves(data: dict, instances, methods, seeds, episodes: int,
             mat = np.array(matrix, dtype=float)
             mean_c = np.nanmean(mat, axis=0)
 
-            ax.plot(common_eps, mean_c, color=color, linewidth=2, label=label)
+            ax.plot(common_eps, mean_c, color=color, linewidth=1.8, label=label)
             has_data = True
 
             # Collect curriculum stage-change positions for this method
@@ -619,10 +650,17 @@ def make_learning_curves(data: dict, instances, methods, seeds, episodes: int,
                 drawn_eps.add(ep)
 
         if has_data:
-            ax.set_title(f"Learning curves — {inst}", fontsize=13, fontweight="bold")
+            ax.set_title(
+                f"Learning curves — Navigation — Instance {inst}"
+                if domain == "navigation"
+                else f"Learning curves — {inst}",
+                fontsize=13, fontweight="bold",
+            )
             ax.set_xlabel("Training episode")
-            ax.set_ylabel("Eval success rate")
-            ax.set_ylim(-0.05, 1.05)
+            ax.set_ylabel("Episode return" if domain == "navigation"
+                           else "Eval success rate")
+            if domain != "navigation":
+                ax.set_ylim(-0.05, 1.05)
             ax.legend(fontsize=9)
             plt.tight_layout()
             out = output_dir / f"learning_curve_{inst}.png"
@@ -644,6 +682,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--episodes", type=int, default=DEFAULT_EPISODES,
                         help=f"Training episodes per run (default: {DEFAULT_EPISODES})")
+    parser.add_argument("--domain", choices=["frozenlake", "navigation"],
+                        default="frozenlake",
+                        help="Environment domain (default: frozenlake)")
     parser.add_argument("--seeds", type=int, default=DEFAULT_SEEDS,
                         help=f"Number of seeds, starting at 1 (default: {DEFAULT_SEEDS})")
     parser.add_argument("--instances", nargs="+", default=DEFAULT_INSTANCES,
@@ -662,6 +703,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base-port", type=int, default=12345,
                         help="Premier port TCP pour les serveurs Java (default: 12345). "
                              "Worker i utilise base_port + i.")
+    parser.add_argument("--alpha", type=float, default=40.0,
+                        help="Navigation CP-ETR shaping coefficient")
+    parser.add_argument("--bp-iter", type=int, default=1,
+                        help="Navigation CP server belief-propagation iterations")
     parser.add_argument("--force", action="store_true",
                         help="Re-run even if a cache entry already exists")
     parser.add_argument("--plots-only", action="store_true",
@@ -671,6 +716,22 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.domain == "navigation":
+        if args.instances == DEFAULT_INSTANCES:
+            args.instances = ["1"]
+        unsupported = set(args.methods) - {"q-none", "q-cp-etr"}
+        if unsupported:
+            print(
+                "[ERROR] Navigation supporte seulement q-none et q-cp-etr; "
+                f"methodes invalides: {sorted(unsupported)}"
+            )
+            sys.exit(1)
+        if args.alpha < 0 or not np.isfinite(args.alpha):
+            print("[ERROR] --alpha doit etre un nombre fini positif ou nul.")
+            sys.exit(1)
+        if args.bp_iter < 1:
+            print("[ERROR] --bp-iter doit etre >= 1.")
+            sys.exit(1)
     seeds = list(range(1, args.seeds + 1))
 
     # Validate method strings early
@@ -689,6 +750,9 @@ def main() -> None:
             episodes=args.episodes,
             output_dir=args.output_dir,
             force=args.force,
+            domain=args.domain,
+            alpha=args.alpha,
+            bp_iter=args.bp_iter,
             workers=args.workers,
             base_port=args.base_port,
         )
@@ -700,7 +764,8 @@ def main() -> None:
     make_summary_table(data, args.instances, args.methods, seeds,
                        output_dir=args.output_dir)
     make_learning_curves(data, args.instances, args.methods, seeds,
-                         episodes=args.episodes, output_dir=args.output_dir)
+                         episodes=args.episodes, output_dir=args.output_dir,
+                         domain=args.domain)
     print("All done.")
 
 

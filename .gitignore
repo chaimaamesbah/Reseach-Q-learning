@@ -13,6 +13,8 @@ MiniCPBP/target/
 # Experiment outputs (generated, not versioned)
 experiment_results/cache/
 results/
+navigation_experiments/
+navigation_alpha1_experiments/
 
 # IDE
 .idea/
