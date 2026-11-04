@@ -88,6 +88,8 @@ def train_q_learning(env, total_episodes, max_steps, size, holes, goal,
                 next_state, reward, terminated, truncated, info = env.step(action)
                 done = terminated or truncated
             except Exception as err:
+                if hasattr(env, "goal_state_idx"):
+                    raise
                 _log(f"ERROR: env.step exception: {err}.", verbose, logger=logger)
                 break
 
@@ -96,19 +98,50 @@ def train_q_learning(env, total_episodes, max_steps, size, holes, goal,
                 break
 
             reward_used_for_update = reward
+            old_q = q_table[current_state_for_update, action]
+
             best_next_action_q_value = np.max(q_table[next_state])
             td_target = reward_used_for_update + gamma_discount * best_next_action_q_value * (1 - int(done))
             td_error = td_target - q_table[current_state_for_update, action]
             q_table[current_state_for_update, action] += lr * td_error
 
+            # if episode + 1 in {1, 2, 390, 400, 430}:
+            #     action_names = ["Attendre", "Est", "Nord", "Sud", "Ouest"]
+
+            #     print(f"\nPolitique à l'épisode {episode + 1}")
+
+            #     for s in range(state_size):
+            #         best_action = int(np.argmax(q_table[s]))
+            #         print(
+            #             f"État {s:2d} : "
+            #             f"{action_names[best_action]:8s} "
+            #             f"Q = {q_table[s, best_action]:.4f}"
+            #         )
+
+                # tqdm.write(f"\nÉpisode {episode + 1} | Étape {step_idx + 1}")
+                # tqdm.write(f"État : {current_state_for_update} → {next_state}")
+                # tqdm.write(f"Action : {action_names[action]}")
+                # tqdm.write(f"Récompense : {reward}")
+                # tqdm.write(
+                #     f"Q[{current_state_for_update}, {action}] : "
+                #     f"{old_q:.3f} → {q_table[current_state_for_update, action]:.3f}"
+                # )
+
+                # tqdm.write("\n          Attendre     Est     Nord      Sud    Ouest")
+                # for s in range(state_size):
+                #     values = " ".join(f"{v:8.3f}" for v in q_table[s])
+                #     tqdm.write(f"État {s:2d} : {values}")
+
+                # tqdm.write("-" * 65)
+
             shaped_reward_sum += reward_used_for_update
-            env_reward_sum += reward
+            env_reward_sum += info.get("raw_reward", reward)
             state = next_state
             if done:
                 final_reward = reward
                 break
 
-        success = int(final_reward == 1.0 and terminated)
+        success = int(utils.is_success(env, state, terminated, final_reward))
         episode_log.append({
             'episode': episode + 1, 'steps': episode_steps,
             'env_reward': env_reward_sum, 'shaped_reward': shaped_reward_sum,
@@ -117,7 +150,15 @@ def train_q_learning(env, total_episodes, max_steps, size, holes, goal,
         epsilon = max(epsilon * eps_decay, eps_min)
 
         if (episode + 1) % config.EVAL_FREQUENCY == 0 or (episode + 1) == total_episodes:
-            sr, ar_undisc, ar_disc, avg_ss, avg_sf = utils.evaluate_agent(env, q_table, max_steps, config.EVAL_EPISODES)
+            # Evaluate CP-trained policies using the original RDDL rewards.
+            if hasattr(env, "set_evaluation_mode"):
+                env.set_evaluation_mode(True)
+            try:
+                sr, ar_undisc, ar_disc, avg_ss, avg_sf = utils.evaluate_agent(
+                    env, q_table, max_steps, config.EVAL_EPISODES)
+            finally:
+                if hasattr(env, "set_evaluation_mode"):
+                    env.set_evaluation_mode(False)
             evaluation_log.append({
                 'training_episode': episode + 1, 'eval_success_rate': sr,
                 'eval_avg_return': ar_undisc, 'eval_avg_discounted_return': ar_disc,
@@ -130,11 +171,14 @@ def train_q_learning(env, total_episodes, max_steps, size, holes, goal,
             _log(f"  Avg Steps (Success/Fail):  {avg_ss:.1f} / {avg_sf:.1f}", verbose, logger=logger)
             _log(f"  Current Epsilon:           {epsilon:.4f}", verbose, logger=logger)
             _log("  Current Greedy Policy:", verbose, logger=logger)
-            policy_grid = utils.get_policy_grid_from_q_table(q_table, size, holes, goal)
-            if policy_grid:
-                for row_str in policy_grid:
-                    _log(f"    {row_str}", verbose, logger=logger)
-            _log("-" * (4 + size + 1), verbose, logger=logger)
+            # L'affichage 2D existant est specifique a FrozenLake (grille carree).
+            if size is not None and not hasattr(env, "dead_state_idx"):
+                policy_grid = utils.get_policy_grid_from_q_table(q_table, size, holes, goal)
+                if policy_grid:
+                    for row_str in policy_grid:
+                        _log(f"    {row_str}", verbose, logger=logger)
+            _log("-" * (4 + size + 1) if size is not None else "-" * 40,
+                 verbose, logger=logger)
             _maybe_save_qtable(q_table, shaping_method_name, instance_id, total_episodes,
                                episode + 1, verbose, run_dir)
 

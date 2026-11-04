@@ -79,6 +79,14 @@ def load_results_log(filename="results/training_log.json"):
         return None
 
 
+
+def is_success(env, state, terminated, reward):
+    """FrozenLake: +1 terminal; Navigation: position explicite du but."""
+    if hasattr(env, "goal_state_idx"):
+        return state == env.goal_state_idx
+    return terminated and reward == 1.0
+
+
 def evaluate_agent(env, q_table, max_steps, eval_episodes=config.EVAL_EPISODES, aug_mapper=None):
     """
     Evaluate agent policy. Calculates success rate, avg env return (undiscounted),
@@ -143,22 +151,25 @@ def evaluate_agent(env, q_table, max_steps, eval_episodes=config.EVAL_EPISODES, 
                 next_state, reward, terminated, truncated, info = env.step(action)
                 done = terminated or truncated
             except Exception as err:
+                if hasattr(env, "goal_state_idx"):
+                    raise RuntimeError(
+                        f"Erreur pendant l'évaluation Navigation, épisode {episode_idx + 1}"
+                    ) from err
                 print(f"ERROR during evaluation step: {err} (Episode {episode_idx}).")
                 terminated = True
                 done = True
                 reward = 0.0
                 break
             episode_undiscounted_return += reward
+            episode_discounted_return += (gamma ** step_count) * reward
             state = next_state
             step_count += 1
         total_undiscounted_return += episode_undiscounted_return
-        if terminated and reward == 1.0:
+        if is_success(env, state, terminated, reward):
             wins += 1
             success_steps.append(step_count)
-            episode_discounted_return = (gamma ** (step_count - 1)) * 1.0
         else:
             failure_steps.append(step_count)
-            episode_discounted_return = 0.0
         total_discounted_return += episode_discounted_return
     success_rate = float(wins / eval_episodes)
     avg_undiscounted_return = float(total_undiscounted_return / eval_episodes)

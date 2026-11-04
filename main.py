@@ -3,7 +3,10 @@ import argparse
 import datetime
 import json
 import logging
+import math
+import shutil
 import os
+import socket
 import subprocess
 import time
 import random
@@ -43,9 +46,152 @@ def vprint(msg: str, verbose: int, min_level: int = 1, logger: logging.Logger = 
         logger.info(msg)
 
 
+def _start_navigation_cp_server(cp_dir: str, port: int, bp_iter: int, run_dir: str):
+    """Start the Navigation CP service and return its process and log files."""
+    if shutil.which("mvn") is None:
+        raise RuntimeError("Maven ('mvn') absent du PATH.")
+
+    metadata_source = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "navigation",
+        "navigation_mdp_ippc2011.json",
+    )
+    metadata_target = os.path.join(cp_dir, "navigation_mdp_ippc2011.json")
+    if not os.path.isfile(metadata_source):
+        raise FileNotFoundError(f"Metadonnees Navigation manquantes : {metadata_source}")
+    shutil.copyfile(metadata_source, metadata_target)
+
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.4):
+            raise RuntimeError(f"Le port CP {port} est deja occupe.")
+    except ConnectionRefusedError:
+        pass
+
+    stdout_path = os.path.join(run_dir, "java_cp_stdout.log")
+    stderr_path = os.path.join(run_dir, "java_cp_stderr.log")
+    cmd = [
+        "mvn", "-f", os.path.join(cp_dir, "pom.xml"),
+        "compile", "exec:java",
+        "-Dexec.cleanupDaemonThreads=false",
+        "-Dexec.mainClass=minicpbp.examples.NavigationService",
+        f"-Dexec.args={port}",
+        "-Dexec.jvmArgs=-Xmx4g",
+        f"-Dbp.iterations={bp_iter}",
+    ]
+    stdout = open(stdout_path, "w", encoding="utf-8")
+    stderr = open(stderr_path, "w", encoding="utf-8")
+    process = subprocess.Popen(cmd, cwd=cp_dir, stdout=stdout, stderr=stderr, text=True)
+
+    for _ in range(120):
+        if process.poll() is not None:
+            stdout.close()
+            stderr.close()
+            raise RuntimeError(
+                f"Serveur Navigation arrete avec code {process.returncode}; "
+                f"voir {stderr_path}"
+            )
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.4):
+                return process, stdout, stderr
+        except OSError:
+            time.sleep(0.5)
+
+    _cleanup_cp(process, None)
+    stdout.close()
+    stderr.close()
+    raise TimeoutError(f"Serveur Navigation indisponible; voir {stderr_path}")
+
+
+def _run_navigation(args, current_seed: int, run_dir: str, log_file: str, logger: logging.Logger):
+    """Run standard or CP-ETR Q-learning on the Navigation RDDL environment."""
+    from navigation.navigation_environment import NavigationEnv
+
+    if args.agent != "q":
+        raise ValueError("Navigation supporte uniquement --agent q.")
+    if args.shaping not in ("none", "cp-etr"):
+        raise ValueError("Navigation supporte uniquement --shaping none ou cp-etr.")
+    if args.budget != 0:
+        raise ValueError("--budget n'est pas supporte pour Navigation.")
+    if args.episodes <= 0:
+        raise ValueError("--episodes doit etre strictement positif.")
+    if args.bp_iter <= 0:
+        raise ValueError("--bp-iter doit etre strictement positif.")
+    if not math.isfinite(args.alpha):
+        raise ValueError("--alpha doit etre fini.")
+
+    java_process = None
+    cp_client = None
+    log_streams = []
+    try:
+        if args.shaping == "cp-etr":
+            from navigation.navigation_cp_etr import NavigationCPClient, NavigationCPEnv
+
+            project_dir = os.path.dirname(os.path.abspath(__file__))
+            cp_dir = os.path.join(project_dir, "MiniCPBP")
+            if not os.path.isfile(os.path.join(cp_dir, "pom.xml")):
+                raise FileNotFoundError(f"pom.xml not found in {cp_dir}")
+
+            cp_port = args.port if args.port is not None else 12350
+            if not 1 <= cp_port <= 65535:
+                raise ValueError("--port doit etre compris entre 1 et 65535.")
+            java_process, *log_streams = _start_navigation_cp_server(
+                cp_dir, cp_port, args.bp_iter, run_dir
+            )
+            cp_client = NavigationCPClient(port=cp_port)
+            if not cp_client.connect(str(args.instance)):
+                raise RuntimeError("Connexion au serveur Navigation CP impossible.")
+            env = NavigationCPEnv(
+                instance_id=str(args.instance),
+                client=cp_client,
+                alpha=args.alpha,
+                gamma=config.DISCOUNT_FACTOR,
+            )
+        else:
+            env = NavigationEnv(instance_id=str(args.instance))
+
+        env.reset(seed=current_seed)
+        env.action_space.seed(current_seed)
+        metadata = {
+            "instance_id": f"navigation_{args.instance}",
+            "max_steps": env.horizon,
+            "size": None,
+            "holes": [],
+            "goal": env.goal_state_idx,
+        }
+        vprint(
+            f"Instance Navigation '{args.instance}' | Agent: q | "
+            f"Shaping: {args.shaping} | Seed: {current_seed}",
+            args.verbose,
+            min_level=1,
+            logger=logger,
+        )
+        train_fn = lambda e, episodes, max_steps: q_learning_standard.train_q_learning(
+            e, episodes, max_steps,
+            metadata["size"], metadata["holes"], metadata["goal"],
+            args.shaping, metadata["instance_id"],
+            verbose=args.verbose, run_dir=run_dir, logger=logger,
+        )
+        _run_q_learning_session(
+            env, train_fn, args, metadata["max_steps"], log_file,
+            java_process=java_process, cp_client=cp_client,
+            size=None, holes=[], goal=metadata["goal"],
+            verbose=args.verbose, run_dir=run_dir, logger=logger,
+        )
+    finally:
+        if cp_client is not None:
+            cp_client.close()
+        if java_process is not None:
+            _cleanup_cp(java_process, None)
+        for stream in log_streams:
+            stream.close()
+        if "env" in locals():
+            env.close()
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Train/Evaluate FrozenLake agents.")
-    parser.add_argument('--instance', type=str, required=True, help="Instance ID from instances.json")
+    parser = argparse.ArgumentParser(description="Train/Evaluate FrozenLake or Navigation agents.")
+    parser.add_argument('--domain', choices=['frozenlake', 'navigation'], default='frozenlake')
+    parser.add_argument('--instance', type=str, required=True, help="Instance ID for the selected domain")
     parser.add_argument('--agent', type=str, choices=['q', 'optimal', 'cp_greedy'], default='q', help="Agent type")
     parser.add_argument('--shaping', type=str, choices=['none', 'classic', 'cp-ms', 'cp-etr'],
                         default='none', help="Reward shaping for Q-learning")
@@ -61,11 +207,16 @@ def main():
                         ))
     parser.add_argument('--episodes', type=int, default=500, help="Training episodes for Q-learning")
     parser.add_argument('--seed', type=int, default=None, help="Random seed to override config.seed_value")
-    parser.add_argument('--port', type=int, default=12345, help="TCP port for the Java CP server (default: 12345)")
+    parser.add_argument('--port', type=int, default=None,
+                        help="TCP port for the Java CP server (FrozenLake: 12345, Navigation: 12350)")
     parser.add_argument('--no-compile', action='store_true',
                         help="Skip 'mvn compile' step (use when Java is already compiled)")
     parser.add_argument('--cp-nbsteps-override', type=int, default=-1,
                         help="Override cp_nbSteps for the Java CP server (-1 = use instances.json value)")
+    parser.add_argument('--alpha', type=float, default=40.0,
+                        help="Navigation CP-ETR shaping coefficient")
+    parser.add_argument('--bp-iter', type=int, default=1,
+                        help="Navigation CP belief-propagation iterations")
     parser.add_argument('--results-dir', type=str, default=None,
                         help="Dossier racine où écrire les résultats (default: results/)")
     parser.add_argument('--verbose', type=int, choices=[0, 1, 2], default=0,
@@ -83,6 +234,25 @@ def main():
         current_seed = config.seed_value
     random.seed(current_seed)
     np.random.seed(current_seed)
+    args.seed = current_seed
+
+    if args.domain == "navigation":
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_name = f"q_{args.shaping}_navigation_{args.instance}_{args.episodes}eps_seed{current_seed}_{timestamp}"
+        results_base = args.results_dir if args.results_dir is not None else "results"
+        run_dir = os.path.join(results_base, run_name)
+        os.makedirs(run_dir, exist_ok=True)
+        log_file = os.path.join(run_dir, "result.json")
+        logger = _setup_logging(args.verbose, run_dir)
+        try:
+            _run_navigation(args, current_seed, run_dir, log_file, logger)
+        except (FileNotFoundError, RuntimeError, ValueError, TimeoutError) as err:
+            tqdm.write(f"ERROR Navigation: {err}")
+            raise
+        return
+
+    if args.port is None:
+        args.port = 12345
 
     instances_path = "instances.json"
     try:
@@ -298,6 +468,8 @@ def _run_q_learning_session(env, train_fn, args, max_steps_config, log_file,
             q_table, episodes, evaluations = result
     except Exception as e:
         tqdm.write(f"ERROR during training: {e}")
+        if args.domain == "navigation":
+            raise
         import traceback
         traceback.print_exc()
     finally:
@@ -317,7 +489,7 @@ def _run_q_learning_session(env, train_fn, args, max_steps_config, log_file,
     plots_dir = os.path.join(run_dir, "plots")
     try:
         utils.plot_results([log_file], plots_dir)
-        if q_table is not None:
+        if q_table is not None and size is not None:
             policy_label = args.shaping
             if args.budget > 0:
                 policy_label += f"_b{args.budget}_{args.noslip_strategy}"
