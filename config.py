@@ -19,6 +19,11 @@ Q_INIT_VALUE_CP_ETR_BUDGET_NOSLIP = -0.1  # Valeur initiale pour les actions no-
 # Reward shaping coefficients
 CP_MS_SHAPING_COEFF = 0.2   # Coefficient appliqué à (marginal - 0.25) en mode CP-MS
 
+
+def decay_epsilon(epsilon):
+    """Apply the report's per-episode epsilon schedule."""
+    return max(EPSILON_MIN, epsilon * EPSILON_DECAY)
+
 # Evaluation parameters
 EVAL_EPISODES = 100  # Number of episodes *per evaluation run*
 EVAL_FREQUENCY = 10  # Evaluate the agent every X training episodes

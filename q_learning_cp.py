@@ -17,6 +17,7 @@ import logging
 import numpy as np
 import config
 import utils
+from reward_shaping import cp_etr_reward
 import datetime
 import os
 from tqdm import tqdm
@@ -434,7 +435,6 @@ def train_q_learning_with_cp_shaping(env, cp_client, total_episodes, max_steps, 
         _log("  No-slip strategy: N/A (4-action mode)", verbose, logger=logger)
 
     epsilon, lr, gamma_discount, eps_min = _get_hyperparameters()
-    eps_decay = (eps_min / epsilon) ** (1.0 / total_episodes)
     episode_log, evaluation_log = [], []
 
     if not cp_client or not cp_client.is_connected:

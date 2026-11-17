@@ -147,7 +147,7 @@ def train_q_learning(env, total_episodes, max_steps, size, holes, goal,
             'env_reward': env_reward_sum, 'shaped_reward': shaped_reward_sum,
             'success': success
         })
-        epsilon = max(epsilon * eps_decay, eps_min)
+        epsilon = config.decay_epsilon(epsilon)
 
         if (episode + 1) % config.EVAL_FREQUENCY == 0 or (episode + 1) == total_episodes:
             # Evaluate CP-trained policies using the original RDDL rewards.
@@ -278,7 +278,7 @@ def train_q_learning_with_classic_shaping(env, total_episodes, max_steps, grid_s
             'env_reward': env_reward_sum, 'shaped_reward': shaped_reward_sum,
             'success': success
         })
-        epsilon = max(epsilon * eps_decay, eps_min)
+        epsilon = config.decay_epsilon(epsilon)
 
         if (episode + 1) % config.EVAL_FREQUENCY == 0 or (episode + 1) == total_episodes:
             sr, ar_undisc, ar_disc, avg_ss, avg_sf = utils.evaluate_agent(env, q_table, max_steps, config.EVAL_EPISODES)
