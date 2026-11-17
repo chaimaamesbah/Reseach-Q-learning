@@ -409,14 +409,17 @@ public class NavigationService {
     }
 
     /**
-     * Reward: R[s][a][s'] = 0 if s'==goalPosIdx, else -1.
+     * Reward from the Navigation RDDL model: -1 while the current state is
+     * not the goal (including the dead state), and 0 in the absorbing goal.
+     * The RDDL reward is evaluated on the current state, before the transition.
      */
     private static int[][][] buildRewardMatrix(int nbStates) {
         int[][][] R = new int[nbStates][NB_ACTIONS][nbStates];
         for (int s = 0; s < nbStates; s++) {
             for (int a = 0; a < NB_ACTIONS; a++) {
+                int reward = (s == goalPosIdx) ? 0 : -1;
                 for (int ns = 0; ns < nbStates; ns++) {
-                    if (ns != goalPosIdx) R[s][a][ns] = -1;
+                    R[s][a][ns] = reward;
                 }
             }
         }
