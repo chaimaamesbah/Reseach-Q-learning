@@ -17,6 +17,7 @@ Q_INIT_VALUE_CP_ETR = 0.0
 Q_INIT_VALUE_CP_ETR_BUDGET_NOSLIP = -0.1  # Valeur initiale pour les actions no-slip (actions 4-7) quand budget > 0
 
 # Reward shaping coefficients
+CP_ETR_SHAPING_COEFF = 1.0  # Coefficient applied to the CP-ETR potential difference
 CP_MS_SHAPING_COEFF = 0.2   # Coefficient appliqué à (marginal - 0.25) en mode CP-MS
 
 

@@ -544,18 +544,24 @@ def train_q_learning_with_cp_shaping(env, cp_client, total_episodes, max_steps, 
                 cp_shaping = config.CP_MS_SHAPING_COEFF * (action_marginal - 0.25)
                 reward_used_for_update = env_reward + cp_shaping + noslip_penalty
             elif shaping_type == 'cp-etr':
-                etr_after = cp_client.query_etr()
-                if etr_after is None or etr_before is None:
-                    _log(f"WARN: Failed ETR query after step {step_idx}. Using env_reward.",
-                         verbose, logger=logger)
-                    reward_used_for_update = env_reward + noslip_penalty
+                # Terminal transitions use Phi(s_terminal)=0 and retain the
+                # environment reward.  No future Q value is bootstrapped below
+                # because ``done`` already includes terminated and truncated.
+                if terminated or truncated:
+                    reward_used_for_update = cp_etr_reward(
+                        env_reward, etr_before or 0.0, 0.0,
+                    ) + noslip_penalty
                 else:
-                    cp_shaping = etr_after - etr_before
-                    reward_used_for_update = cp_shaping + noslip_penalty
-                    # Negative signal on hole: wipe out accumulated ETR progress
-                    if terminated and env_reward == 0.0 and step_idx < max_steps - 1:
-                        reward_used_for_update = -etr_before + noslip_penalty
-                    etr_before = etr_after
+                    etr_after = cp_client.query_etr()
+                    if etr_after is None or etr_before is None:
+                        _log(f"WARN: Failed ETR query after step {step_idx}. Using env_reward.",
+                             verbose, logger=logger)
+                        reward_used_for_update = env_reward + noslip_penalty
+                    else:
+                        reward_used_for_update = cp_etr_reward(
+                            env_reward, etr_before, etr_after,
+                        ) + noslip_penalty
+                        etr_before = etr_after
             else:
                 reward_used_for_update = env_reward + noslip_penalty
 
@@ -590,7 +596,7 @@ def train_q_learning_with_cp_shaping(env, cp_client, total_episodes, max_steps, 
             'success': success,
             'noslip_used': noslip_count
         })
-        epsilon = max(epsilon * eps_decay, eps_min)
+        epsilon = config.decay_epsilon(epsilon)
 
         # Periodic evaluation
         if (episode + 1) % config.EVAL_FREQUENCY == 0 or (episode + 1) == total_episodes:

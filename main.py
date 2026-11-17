@@ -221,7 +221,7 @@ def main():
                         help="Skip 'mvn compile' step (use when Java is already compiled)")
     parser.add_argument('--cp-nbsteps-override', type=int, default=-1,
                         help="Override cp_nbSteps for the Java CP server (-1 = use instances.json value)")
-    parser.add_argument('--alpha', type=float, default=40.0,
+    parser.add_argument('--alpha', type=float, default=config.CP_ETR_SHAPING_COEFF,
                         help="Navigation CP-ETR shaping coefficient")
     parser.add_argument('--bp-iter', type=int, default=1,
                         help="Navigation CP belief-propagation iterations")

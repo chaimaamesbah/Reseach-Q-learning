@@ -57,6 +57,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+import config
 
 # ---------------------------------------------------------------------------
 # Constants / defaults
@@ -233,7 +234,7 @@ def _budget_stage_changes(meth: str, episodes: int) -> list[int]:
 # ---------------------------------------------------------------------------
 
 def _build_cmd(meth: str, inst: str, episodes: int, seed: int, tmp_dir: str,
-               domain: str = "frozenlake", alpha: float = 40.0,
+               domain: str = "frozenlake", alpha: float = config.CP_ETR_SHAPING_COEFF,
                bp_iter: int = 1, port: int = 12345,
                no_compile: bool = False) -> list[str]:
     base, budget, strategy = _parse_method(meth)
@@ -270,7 +271,7 @@ def _build_cmd(meth: str, inst: str, episodes: int, seed: int, tmp_dir: str,
 
 def _run_one(inst: str, meth: str, seed: int, episodes: int,
              output_dir: Path, tag: str, print_lock: threading.Lock,
-             domain: str = "frozenlake", alpha: float = 40.0,
+             domain: str = "frozenlake", alpha: float = config.CP_ETR_SHAPING_COEFF,
              bp_iter: int = 1,
              port: int = 12345, no_compile: bool = False,
              progress_bar: "tqdm | None" = None) -> tuple[tuple, dict | None]:
@@ -366,7 +367,7 @@ def _precompile_java(print_lock: threading.Lock) -> bool:
 
 
 def run_all(instances, methods, seeds, episodes, output_dir, force,
-            domain: str = "frozenlake", alpha: float = 40.0,
+            domain: str = "frozenlake", alpha: float = config.CP_ETR_SHAPING_COEFF,
             bp_iter: int = 1, workers: int = 1,
             base_port: int = 12345) -> dict:
     """
@@ -762,7 +763,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base-port", type=int, default=12345,
                         help="Premier port TCP pour les serveurs Java (default: 12345). "
                              "Worker i utilise base_port + i.")
-    parser.add_argument("--alpha", type=float, default=40.0,
+    parser.add_argument("--alpha", type=float, default=config.CP_ETR_SHAPING_COEFF,
                         help="Navigation CP-ETR shaping coefficient")
     parser.add_argument("--bp-iter", type=int, default=1,
                         help="Navigation CP server belief-propagation iterations")
