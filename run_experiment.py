@@ -11,7 +11,9 @@ Navigation:
 
 Options:
     --episodes N        Training episodes per run          (default: 2000)
-    --seeds N           Number of seeds, starting at 1    (default: 5)
+    --seeds N           Number of seeds to run
+    --seed-start N      First seed to run                 (default: 1)
+    --no-plots          Skip generating plots and summary table
     --instances ID...   Instance IDs to benchmark
     --methods M...      Methods to benchmark              (default: all six)
     --output-dir DIR    Directory for all outputs         (default: ./experiment_results)
@@ -288,7 +290,7 @@ def _run_one(inst: str, meth: str, seed: int, episodes: int,
             alpha=alpha, bp_iter=bp_iter, port=port, no_compile=no_compile,
         )
         result = subprocess.run(
-            cmd, cwd=str(ROOT), capture_output=True, text=True, timeout=7200,
+            cmd, cwd=str(ROOT), capture_output=True, text=True, timeout=None,
         )
         if result.returncode != 0:
             lines = (result.stdout + result.stderr).strip().splitlines()[-20:]
@@ -309,8 +311,6 @@ def _run_one(inst: str, meth: str, seed: int, episodes: int,
         _save_cache(output_dir, inst, meth, seed, episodes, entry)
         return _done(f"  [OK]    {tag}", entry)
 
-    except subprocess.TimeoutExpired:
-        return _done(f"  [ERROR] {tag} — timeout (>7200 s)", None)
     except Exception as exc:
         with print_lock:
             tqdm.write(f"  [ERROR] {tag} — {exc}")
@@ -604,16 +604,9 @@ def make_learning_curves(data: dict, instances, methods, seeds, episodes: int,
                 entry = data.get((inst, meth, seed))
                 if entry is None:
                     continue
-                if domain == "navigation":
-                    # Navigation curves use the raw environment return per
-                    # episode, matching the PPO learning-curve convention.
-                    logs = entry.get("episode_log", [])
-                    eps = [e["episode"] for e in logs]
-                    srs = [e.get("env_reward", float("nan")) for e in logs]
-                else:
-                    eps = [e["training_episode"] for e in entry["eval_log"]]
-                    srs = [e.get("eval_success_rate", float("nan"))
-                           for e in entry["eval_log"]]
+                eps = [e["training_episode"] for e in entry["eval_log"]]
+                srs = [e.get("eval_success_rate", float("nan"))
+                       for e in entry["eval_log"]]
                 seed_curves[seed] = (eps, srs)
 
             if not seed_curves:
@@ -657,18 +650,80 @@ def make_learning_curves(data: dict, instances, methods, seeds, episodes: int,
                 fontsize=13, fontweight="bold",
             )
             ax.set_xlabel("Training episode")
-            ax.set_ylabel("Episode return" if domain == "navigation"
-                           else "Eval success rate")
-            if domain != "navigation":
-                ax.set_ylim(-0.05, 1.05)
+            ax.set_ylabel("Eval success rate")
+            ax.set_ylim(-0.05, 1.05)
             ax.legend(fontsize=9)
             plt.tight_layout()
-            out = output_dir / f"learning_curve_{inst}.png"
+            out = (
+                output_dir / f"navigation_success_rate_{inst}.png"
+                if domain == "navigation"
+                else output_dir / f"learning_curve_{inst}.png"
+            )
             plt.savefig(out, dpi=150)
             print(f"Learning curve saved: {out}")
         else:
             print(f"[WARN] No data for instance {inst}, skipping plot.")
         plt.close(fig)
+
+        if domain == "navigation":
+            # Navigation-only plot matching PPO: raw environment return,
+            # smoothed over 50 episodes, with one episode equal to 40 steps.
+            return_fig, return_ax = plt.subplots(figsize=(9, 5))
+            return_has_data = False
+            extra_iter = iter(_EXTRA_COLORS)
+            for meth in methods:
+                if _parse_method(meth)[0] not in Q_METHODS:
+                    continue
+                seed_curves = []
+                for seed in seeds:
+                    entry = data.get((inst, meth, seed))
+                    logs = entry.get("episode_log", []) if entry else []
+                    if not logs:
+                        continue
+                    eps = np.asarray([e["episode"] for e in logs], dtype=float)
+                    rewards = np.asarray(
+                        [e.get("env_reward", np.nan) for e in logs],
+                        dtype=float,
+                    )
+                    if len(rewards) >= 50:
+                        kernel = np.ones(50, dtype=float) / 50
+                        padded = np.pad(rewards, (49, 0), mode="edge")
+                        rewards = np.convolve(padded, kernel, mode="valid")
+                    seed_curves.append((eps * 40, rewards))
+                if not seed_curves:
+                    continue
+                common_steps = sorted(set.intersection(
+                    *(set(curve[0]) for curve in seed_curves)
+                ))
+                if not common_steps:
+                    continue
+                matrix = []
+                for steps, rewards in seed_curves:
+                    lookup = dict(zip(steps, rewards))
+                    matrix.append([lookup.get(step, np.nan) for step in common_steps])
+                mean_rewards = np.nanmean(np.asarray(matrix, dtype=float), axis=0)
+                return_ax.plot(
+                    common_steps, mean_rewards, linewidth=1.8,
+                    color=_method_color(meth, extra_iter),
+                    label=_method_label(meth),
+                )
+                return_has_data = True
+            if return_has_data:
+                return_ax.set_title(
+                    f"Learning curves — Navigation — Instance {inst}",
+                    fontsize=13, fontweight="bold",
+                )
+                return_ax.set_xlabel("Timestep")
+                return_ax.set_ylabel("Episode return (raw)")
+                return_ax.legend(fontsize=9)
+                return_ax.grid(alpha=0.3)
+                plt.tight_layout()
+                return_out = output_dir / f"navigation_episode_return_{inst}.png"
+                plt.savefig(return_out, dpi=150)
+                print(f"Navigation return curve saved: {return_out}")
+            else:
+                print(f"[WARN] No Navigation return data for instance {inst}.")
+            plt.close(return_fig)
 
 
 # ---------------------------------------------------------------------------
@@ -686,7 +741,11 @@ def parse_args() -> argparse.Namespace:
                         default="frozenlake",
                         help="Environment domain (default: frozenlake)")
     parser.add_argument("--seeds", type=int, default=DEFAULT_SEEDS,
-                        help=f"Number of seeds, starting at 1 (default: {DEFAULT_SEEDS})")
+                        help=f"Number of seeds to run (default: {DEFAULT_SEEDS})")
+    parser.add_argument("--seed-start", type=int, default=1,
+                        help="Première seed à exécuter (default: 1)")
+    parser.add_argument("--no-plots", action="store_true",
+                        help="Ne pas générer les graphiques ni le tableau récapitulatif")
     parser.add_argument("--instances", nargs="+", default=DEFAULT_INSTANCES,
                         metavar="ID", help="Instance IDs to benchmark")
     parser.add_argument("--methods", nargs="+", default=DEFAULT_METHODS,
@@ -716,6 +775,14 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.seeds < 1 or args.seed_start < 1:
+        print("[ERROR] --seeds et --seed-start doivent être >= 1")
+        sys.exit(1)
+
+    if args.no_plots and args.plots_only:
+        print("[ERROR] --no-plots et --plots-only ne peuvent pas être utilisés ensemble")
+        sys.exit(1)
+
     if args.domain == "navigation":
         if args.instances == DEFAULT_INSTANCES:
             args.instances = ["1"]
@@ -732,7 +799,7 @@ def main() -> None:
         if args.bp_iter < 1:
             print("[ERROR] --bp-iter doit etre >= 1.")
             sys.exit(1)
-    seeds = list(range(1, args.seeds + 1))
+    seeds = list(range(args.seed_start, args.seed_start + args.seeds))
 
     # Validate method strings early
     try:
@@ -761,11 +828,12 @@ def main() -> None:
         data = load_from_cache(args.instances, args.methods, seeds,
                                args.episodes, args.output_dir)
 
-    make_summary_table(data, args.instances, args.methods, seeds,
-                       output_dir=args.output_dir)
-    make_learning_curves(data, args.instances, args.methods, seeds,
-                         episodes=args.episodes, output_dir=args.output_dir,
-                         domain=args.domain)
+    if not args.no_plots:
+        make_summary_table(data, args.instances, args.methods, seeds,
+                           output_dir=args.output_dir)
+        make_learning_curves(data, args.instances, args.methods, seeds,
+                             episodes=args.episodes, output_dir=args.output_dir,
+                             domain=args.domain)
     print("All done.")
 
 

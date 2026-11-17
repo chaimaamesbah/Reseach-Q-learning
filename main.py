@@ -47,9 +47,6 @@ def vprint(msg: str, verbose: int, min_level: int = 1, logger: logging.Logger = 
 
 
 def _start_navigation_cp_server(cp_dir: str, port: int, bp_iter: int, run_dir: str):
-    """Start the Navigation CP service and return its process and log files."""
-    if shutil.which("mvn") is None:
-        raise RuntimeError("Maven ('mvn') absent du PATH.")
 
     metadata_source = os.path.join(
         os.path.dirname(os.path.abspath(__file__)),
@@ -59,7 +56,8 @@ def _start_navigation_cp_server(cp_dir: str, port: int, bp_iter: int, run_dir: s
     metadata_target = os.path.join(cp_dir, "navigation_mdp_ippc2011.json")
     if not os.path.isfile(metadata_source):
         raise FileNotFoundError(f"Metadonnees Navigation manquantes : {metadata_source}")
-    shutil.copyfile(metadata_source, metadata_target)
+    if not os.path.isfile(metadata_target):
+        raise FileNotFoundError(f"Metadonnees Navigation manquantes : {metadata_target}")
 
     try:
         with socket.create_connection(("127.0.0.1", port), timeout=0.4):
@@ -69,15 +67,25 @@ def _start_navigation_cp_server(cp_dir: str, port: int, bp_iter: int, run_dir: s
 
     stdout_path = os.path.join(run_dir, "java_cp_stdout.log")
     stderr_path = os.path.join(run_dir, "java_cp_stderr.log")
+
+    jar_path = os.path.join(
+        cp_dir, "target", "minicpbp-1.0.jar"
+    )
+
+    if not os.path.isfile(jar_path):
+        raise FileNotFoundError(
+            f"JAR MiniCPBP introuvable : {jar_path}"
+        )
+
     cmd = [
-        "mvn", "-f", os.path.join(cp_dir, "pom.xml"),
-        "compile", "exec:java",
-        "-Dexec.cleanupDaemonThreads=false",
-        "-Dexec.mainClass=minicpbp.examples.NavigationService",
-        f"-Dexec.args={port}",
-        "-Dexec.jvmArgs=-Xmx4g",
+        "java",
         f"-Dbp.iterations={bp_iter}",
+        "-cp",
+        jar_path,
+        "minicpbp.examples.NavigationService",
+        str(port),
     ]
+
     stdout = open(stdout_path, "w", encoding="utf-8")
     stderr = open(stderr_path, "w", encoding="utf-8")
     process = subprocess.Popen(cmd, cwd=cp_dir, stdout=stdout, stderr=stderr, text=True)
