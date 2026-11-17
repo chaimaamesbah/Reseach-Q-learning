@@ -9,6 +9,8 @@ import math
 import socket
 from typing import Optional
 
+import config
+from reward_shaping import cp_etr_reward
 from .navigation_environment import NavigationEnv
 
 
@@ -90,7 +92,8 @@ class NavigationCPEnv(NavigationEnv):
     """
 
     def __init__(self, instance_id: str, client: NavigationCPClient,
-                 alpha: float = 40.0, gamma: float = 0.995):
+                 alpha: float = config.CP_ETR_SHAPING_COEFF,
+                 gamma: float = config.DISCOUNT_FACTOR):
         super().__init__(instance_id=instance_id)
         self.client = client
         self.alpha = alpha
@@ -119,21 +122,35 @@ class NavigationCPEnv(NavigationEnv):
         if self._evaluation_mode:
             return state, reward, terminated, truncated, info
 
-        # Mêmes conditions que NavigationCPShaper de PPO-CP :
-        # ne pas shaper les transitions terminales et ne plus interroger CP
-        # une fois que le but ou l'etat mort a ete atteint.
-        if self._terminal_reached or terminated or truncated:
-            return state, reward, terminated, truncated, info
-        if state in (self.goal_state_idx, self.dead_state_idx):
-            self._terminal_reached = True
-            self._etr_before = 0.0
+        # Once a terminal state was already observed, preserve the existing
+        # environment behavior without issuing further CP requests.
+        if self._terminal_reached:
             return state, reward, terminated, truncated, info
 
         self.client.step(self._cp_step_idx, Q_TO_JAVA_ACTION[int(action)], state)
         self._cp_step_idx += 1
-        etr_after = self.client.query_etr()
-        shaping = self.alpha * (self.gamma * etr_after - self._etr_before)
-        self._etr_before = etr_after
+        terminal_transition = (
+            terminated
+            or truncated
+            or state in (self.goal_state_idx, self.dead_state_idx)
+        )
+        if terminal_transition:
+            # The CP server's terminal ETR is not the potential used by
+            # finite-horizon PBRS: Phi(s_terminal) is defined as zero.
+            etr_after = 0.0
+            shaping = cp_etr_reward(
+                reward, self._etr_before, etr_after,
+                alpha=self.alpha, gamma=self.gamma,
+            ) - float(reward)
+            self._terminal_reached = True
+            self._etr_before = 0.0
+        else:
+            etr_after = self.client.query_etr()
+            shaping = cp_etr_reward(
+                reward, self._etr_before, etr_after,
+                alpha=self.alpha, gamma=self.gamma,
+            ) - float(reward)
+            self._etr_before = etr_after
         self.shaped_steps += 1
         info["etr_after"] = etr_after
         info["cp_shaping"] = shaping
