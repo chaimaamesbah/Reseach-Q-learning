@@ -142,11 +142,18 @@ def train_q_learning(env, total_episodes, max_steps, size, holes, goal,
                 break
 
         success = int(utils.is_success(env, state, terminated, final_reward))
-        episode_log.append({
+        episode_entry = {
             'episode': episode + 1, 'steps': episode_steps,
             'env_reward': env_reward_sum, 'shaped_reward': shaped_reward_sum,
             'success': success
-        })
+        }
+        if getattr(env, "domain", None) == "crossingtraffic":
+            episode_entry.update({
+                "terminated": bool(terminated),
+                "truncated": bool(truncated),
+                "state_terminal": bool(info.get("state_terminal", False)),
+            })
+        episode_log.append(episode_entry)
         epsilon = config.decay_epsilon(epsilon)
 
         if (episode + 1) % config.EVAL_FREQUENCY == 0 or (episode + 1) == total_episodes:

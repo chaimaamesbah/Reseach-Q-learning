@@ -39,6 +39,7 @@ Cache:
 
 import argparse
 import csv
+import hashlib
 import json
 import queue
 import shutil
@@ -169,9 +170,15 @@ def _method_color(raw: str, extra_iter) -> str:
 # Cache helpers  (experiment_results/cache/ — never touches results/)
 # ---------------------------------------------------------------------------
 
-def _navigation_horizons(inst: str) -> tuple[int | None, int | None]:
-    """Return the Python and CP horizons recorded for a Navigation instance."""
-    metadata_path = ROOT / "navigation" / "navigation_mdp_ippc2011.json"
+def _domain_horizons(inst: str, domain: str) -> tuple[int | None, int | None]:
+    """Return Python/CP horizons from the metadata of a supported domain."""
+    metadata_name = {
+        "navigation": ("navigation", "navigation_mdp_ippc2011.json"),
+        "crossingtraffic": ("crossingtraffic", "crossingtraffic_mdp_ippc2011.json"),
+    }.get(domain)
+    if metadata_name is None:
+        return None, None
+    metadata_path = ROOT / metadata_name[0] / metadata_name[1]
     try:
         with metadata_path.open(encoding="utf-8") as f:
             data = json.load(f)
@@ -181,12 +188,19 @@ def _navigation_horizons(inst: str) -> tuple[int | None, int | None]:
         return None, None
 
 
+def _navigation_horizons(inst: str) -> tuple[int | None, int | None]:
+    """Backward-compatible Navigation horizon helper."""
+    return _domain_horizons(inst, "navigation")
+
+
 def _cache_parameters(inst: str, domain: str, alpha: float,
                       bp_iter: int, python_horizon: int | None = None,
                       cp_nb_steps: int | None = None) -> tuple:
     """Normalize every experiment parameter that affects a cached result."""
-    if domain == "navigation" and (python_horizon is None or cp_nb_steps is None):
-        json_horizon, json_cp_steps = _navigation_horizons(inst)
+    if domain in ("navigation", "crossingtraffic") and (
+        python_horizon is None or cp_nb_steps is None
+    ):
+        json_horizon, json_cp_steps = _domain_horizons(inst, domain)
         python_horizon = json_horizon if python_horizon is None else python_horizon
         cp_nb_steps = json_cp_steps if cp_nb_steps is None else cp_nb_steps
     return (
@@ -207,6 +221,20 @@ def _cache_token(value) -> str:
         token = str(value)
     return token.replace("-", "m").replace("+", "p").replace(".", "p")
 
+
+def _model_fingerprint(inst: str, domain: str) -> str | None:
+    """Return a stable fingerprint for the CrossingTraffic model metadata."""
+    if domain != "crossingtraffic":
+        return None
+    metadata_path = ROOT / "crossingtraffic" / "crossingtraffic_mdp_ippc2011.json"
+    try:
+        with metadata_path.open(encoding="utf-8") as f:
+            instance = json.load(f)[str(inst)]
+        payload = json.dumps(instance, sort_keys=True, separators=(",", ":"))
+    except (FileNotFoundError, KeyError, TypeError, ValueError):
+        return None
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+
 def _cache_path(output_dir: Path, inst: str, meth: str, seed: int, episodes: int,
                 reward_mode: str = "original",
                 domain: str = "frozenlake",
@@ -217,11 +245,17 @@ def _cache_path(output_dir: Path, inst: str, meth: str, seed: int, episodes: int
     alpha, bp_iter, python_horizon, cp_nb_steps = _cache_parameters(
         inst, domain, alpha, bp_iter, python_horizon, cp_nb_steps
     )
+    model_fingerprint = _model_fingerprint(inst, domain)
     safe_meth = meth.replace(":", "-")
+    model_suffix = (
+        f"_cfg{_cache_token(model_fingerprint)}"
+        if domain == "crossingtraffic" else ""
+    )
     return output_dir / "cache" / (
         f"{domain}_{inst}_{safe_meth}_reward-{reward_mode}_"
         f"a{_cache_token(alpha)}_bp{bp_iter}_h{_cache_token(python_horizon)}_"
-        f"cp{_cache_token(cp_nb_steps)}_seed{seed}_{episodes}eps.json"
+        f"cp{_cache_token(cp_nb_steps)}{model_suffix}_"
+        f"seed{seed}_{episodes}eps.json"
     )
 
 
@@ -235,6 +269,7 @@ def _load_cache(output_dir: Path, inst: str, meth: str, seed: int,
     alpha, bp_iter, python_horizon, cp_nb_steps = _cache_parameters(
         inst, domain, alpha, bp_iter, python_horizon, cp_nb_steps
     )
+    model_fingerprint = _model_fingerprint(inst, domain)
     p = _cache_path(
         output_dir, inst, meth, seed, episodes, reward_mode, domain,
         alpha, bp_iter, python_horizon, cp_nb_steps,
@@ -254,6 +289,8 @@ def _load_cache(output_dir: Path, inst: str, meth: str, seed: int,
                 "python_horizon": python_horizon,
                 "cp_nb_steps": cp_nb_steps,
             }
+            if domain == "crossingtraffic":
+                expected["model_fingerprint"] = model_fingerprint
             if any(entry.get(key) != value for key, value in expected.items()):
                 return None
             return entry
@@ -272,6 +309,7 @@ def _save_cache(output_dir: Path, inst: str, meth: str, seed: int,
     alpha, bp_iter, python_horizon, cp_nb_steps = _cache_parameters(
         inst, domain, alpha, bp_iter, python_horizon, cp_nb_steps
     )
+    model_fingerprint = _model_fingerprint(inst, domain)
     p = _cache_path(
         output_dir, inst, meth, seed, episodes, reward_mode, domain,
         alpha, bp_iter, python_horizon, cp_nb_steps,
@@ -285,6 +323,8 @@ def _save_cache(output_dir: Path, inst: str, meth: str, seed: int,
         "python_horizon": python_horizon,
         "cp_nb_steps": cp_nb_steps,
     })
+    if domain == "crossingtraffic":
+        entry["model_fingerprint"] = model_fingerprint
     p.parent.mkdir(parents=True, exist_ok=True)
     with open(p, "w") as f:
         json.dump(entry, f, indent=2)
@@ -364,7 +404,7 @@ def _build_cmd(meth: str, inst: str, episodes: int, seed: int, tmp_dir: str,
         cmd += ["--episodes", str(episodes)]
     if shaping is not None:
         cmd += ["--shaping", shaping]
-    if domain == "navigation" and shaping == "cp-etr":
+    if domain in ("navigation", "crossingtraffic") and shaping == "cp-etr":
         cmd += ["--alpha", str(alpha), "--bp-iter", str(bp_iter)]
     if domain == "navigation":
         cmd += ["--reward-mode", reward_mode]
@@ -528,7 +568,7 @@ def run_all(instances, methods, seeds, episodes, output_dir, force,
     # Navigation always uses the precompiled shaded JAR directly; do not
     # trigger Maven during a Narval experiment. FrozenLake keeps its existing
     # pre-compilation path for parallel Java methods.
-    if workers > 1 and needs_java and domain != "navigation":
+    if workers > 1 and needs_java and domain not in ("navigation", "crossingtraffic"):
         if not _precompile_java(print_lock):
             print("[WARN] Pre-compile failed; workers will each compile (may conflict).")
         else:
@@ -798,7 +838,11 @@ def make_learning_curves(data: dict, instances, methods, seeds, episodes: int,
             ax.set_title(
                 f"Learning curves — Navigation ({reward_mode}) — Instance {inst}"
                 if domain == "navigation"
-                else f"Learning curves — {inst}",
+                else (
+                    f"Learning curves — CrossingTraffic — Instance {inst}"
+                    if domain == "crossingtraffic"
+                    else f"Learning curves — {inst}"
+                ),
                 fontsize=13, fontweight="bold",
             )
             ax.set_xlabel("Training episode")
@@ -809,7 +853,7 @@ def make_learning_curves(data: dict, instances, methods, seeds, episodes: int,
             out = (
                 output_dir / f"navigation_success_rate_{inst}_reward-{reward_mode}.png"
                 if domain == "navigation"
-                else output_dir / f"learning_curve_{inst}.png"
+                else output_dir / f"{domain}_learning_curve_{inst}.png"
             )
             plt.savefig(out, dpi=150)
             print(f"Learning curve saved: {out}")
@@ -817,9 +861,10 @@ def make_learning_curves(data: dict, instances, methods, seeds, episodes: int,
             print(f"[WARN] No data for instance {inst}, skipping plot.")
         plt.close(fig)
 
-        if domain == "navigation":
-            # Navigation-only plot matching PPO: raw environment return,
-            # smoothed over 50 episodes, with one episode equal to 40 steps.
+        if domain in ("navigation", "crossingtraffic"):
+            # Raw environment-return curves use the same episode logs as the
+            # success-rate curves.  Navigation keeps its PPO-compatible
+            # timestep axis; CrossingTraffic uses training episodes directly.
             return_fig, return_ax = plt.subplots(figsize=(9, 5))
             return_has_data = False
             extra_iter = iter(_EXTRA_COLORS)
@@ -841,7 +886,7 @@ def make_learning_curves(data: dict, instances, methods, seeds, episodes: int,
                         kernel = np.ones(50, dtype=float) / 50
                         padded = np.pad(rewards, (49, 0), mode="edge")
                         rewards = np.convolve(padded, kernel, mode="valid")
-                    seed_curves.append((eps * 40, rewards))
+                    seed_curves.append((eps * (40 if domain == "navigation" else 1), rewards))
                 if not seed_curves:
                     continue
                 common_steps = sorted(set.intersection(
@@ -862,21 +907,29 @@ def make_learning_curves(data: dict, instances, methods, seeds, episodes: int,
                 return_has_data = True
             if return_has_data:
                 return_ax.set_title(
-                    f"Learning curves — Navigation ({reward_mode}) — Instance {inst}",
+                    (
+                        f"Learning curves — Navigation ({reward_mode}) — Instance {inst}"
+                        if domain == "navigation"
+                        else f"Learning curves — CrossingTraffic — Instance {inst}"
+                    ),
                     fontsize=13, fontweight="bold",
                 )
-                return_ax.set_xlabel("Timestep")
+                return_ax.set_xlabel(
+                    "Timestep" if domain == "navigation" else "Training episode"
+                )
                 return_ax.set_ylabel("Episode return (raw)")
                 return_ax.legend(fontsize=9)
                 return_ax.grid(alpha=0.3)
                 plt.tight_layout()
-                return_out = output_dir / (
-                    f"navigation_episode_return_{inst}_reward-{reward_mode}.png"
+                return_out = (
+                    output_dir / f"navigation_episode_return_{inst}_reward-{reward_mode}.png"
+                    if domain == "navigation"
+                    else output_dir / f"crossingtraffic_episode_return_{inst}.png"
                 )
                 plt.savefig(return_out, dpi=150)
-                print(f"Navigation return curve saved: {return_out}")
+                print(f"{domain.capitalize()} return curve saved: {return_out}")
             else:
-                print(f"[WARN] No Navigation return data for instance {inst}.")
+                print(f"[WARN] No {domain} return data for instance {inst}.")
             plt.close(return_fig)
 
 
@@ -891,7 +944,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--episodes", type=int, default=DEFAULT_EPISODES,
                         help=f"Training episodes per run (default: {DEFAULT_EPISODES})")
-    parser.add_argument("--domain", choices=["frozenlake", "navigation"],
+    parser.add_argument("--domain", choices=["frozenlake", "navigation", "crossingtraffic"],
                         default="frozenlake",
                         help="Environment domain (default: frozenlake)")
     parser.add_argument("--reward-mode", choices=["original", "frozenlake"],
@@ -920,9 +973,9 @@ def parse_args() -> argparse.Namespace:
                         help="Premier port TCP pour les serveurs Java (default: 12345). "
                              "Worker i utilise base_port + i.")
     parser.add_argument("--alpha", type=float, default=config.CP_ETR_SHAPING_COEFF,
-                        help="Navigation CP-ETR shaping coefficient")
+                        help="CP-ETR shaping coefficient")
     parser.add_argument("--bp-iter", type=int, default=1,
-                        help="Navigation CP server belief-propagation iterations")
+                        help="CP server belief-propagation iterations")
     parser.add_argument("--force", action="store_true",
                         help="Re-run even if a cache entry already exists")
     parser.add_argument("--plots-only", action="store_true",
@@ -940,13 +993,18 @@ def main() -> None:
         print("[ERROR] --no-plots et --plots-only ne peuvent pas être utilisés ensemble")
         sys.exit(1)
 
-    if args.domain == "navigation":
+    if args.domain in ("navigation", "crossingtraffic"):
         if args.instances == DEFAULT_INSTANCES:
-            args.instances = ["1"]
+            args.instances = ["1"] if args.domain == "navigation" else ["2", "4"]
+        if args.methods == DEFAULT_METHODS:
+            args.methods = ["q-none", "q-cp-etr"]
+        if args.domain == "crossingtraffic" and args.reward_mode != "original":
+            print("[ERROR] --reward-mode est réservé au domaine Navigation.")
+            sys.exit(1)
         unsupported = set(args.methods) - {"q-none", "q-cp-etr"}
         if unsupported:
             print(
-                "[ERROR] Navigation supporte seulement q-none et q-cp-etr; "
+                f"[ERROR] {args.domain} supporte seulement q-none et q-cp-etr; "
                 f"methodes invalides: {sorted(unsupported)}"
             )
             sys.exit(1)

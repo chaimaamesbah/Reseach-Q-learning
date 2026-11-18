@@ -1,0 +1,44 @@
+{
+  "2": {
+    "description": "CrossingTraffic 3x3, IPPC2011 instance 2",
+    "grid_x": 3,
+    "grid_y": 3,
+    "input_rate": 0.6,
+    "n_states": 74,
+    "goal_state_idx": 73,
+    "dead_state_idx": 72,
+    "init_state_idx": 50,
+    "cp_nbSteps": 45,
+    "horizon": 40,
+    "init_x": 2,
+    "init_y": 0,
+    "goal_x": 2,
+    "goal_y": 2,
+    "initial_obstacles": [
+      4
+    ]
+  },
+  "4": {
+    "description": "CrossingTraffic 4x4, IPPC2011 instance 4",
+    "grid_x": 4,
+    "grid_y": 4,
+    "input_rate": 0.6,
+    "n_states": 4098,
+    "goal_state_idx": 4097,
+    "dead_state_idx": 4096,
+    "init_state_idx": 3180,
+    "cp_nbSteps": 45,
+    "horizon": 40,
+    "init_x": 3,
+    "init_y": 0,
+    "goal_x": 3,
+    "goal_y": 3,
+    "initial_obstacles": [
+      9,
+      6,
+      10,
+      7
+    ]
+  }
+}
+

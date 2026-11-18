@@ -218,9 +218,154 @@ def _run_navigation(args, current_seed: int, run_dir: str, log_file: str, logger
             env.close()
 
 
+def _start_crossingtraffic_cp_server(cp_dir: str, port: int, bp_iter: int, run_dir: str):
+    metadata_source = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "crossingtraffic", "crossingtraffic_mdp_ippc2011.json",
+    )
+    metadata_target = os.path.join(cp_dir, "crossingtraffic_mdp_ippc2011.json")
+    if not os.path.isfile(metadata_source) or not os.path.isfile(metadata_target):
+        raise FileNotFoundError("Métadonnées CrossingTraffic manquantes")
+    try:
+        with open(metadata_source, encoding="utf-8") as source_file:
+            source_metadata = json.load(source_file)
+        with open(metadata_target, encoding="utf-8") as target_file:
+            target_metadata = json.load(target_file)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Métadonnées CrossingTraffic invalides: {exc}") from exc
+    if source_metadata != target_metadata:
+        raise RuntimeError(
+            "Les métadonnées Python et Java de CrossingTraffic sont différentes."
+        )
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.4):
+            raise RuntimeError(f"Le port CP {port} est déjà occupé.")
+    except ConnectionRefusedError:
+        pass
+
+    jar_path = os.path.join(cp_dir, "target", "minicpbp-1.0.jar")
+    if not os.path.isfile(jar_path):
+        raise FileNotFoundError(f"JAR MiniCPBP introuvable : {jar_path}")
+    stdout_path = os.path.join(run_dir, "java_cp_stdout.log")
+    stderr_path = os.path.join(run_dir, "java_cp_stderr.log")
+    cmd = [
+        "java", f"-Dbp.iterations={bp_iter}", "-cp", jar_path,
+        "minicpbp.examples.TrafficCrossingService", str(port),
+    ]
+    stdout = open(stdout_path, "w", encoding="utf-8")
+    stderr = open(stderr_path, "w", encoding="utf-8")
+    process = subprocess.Popen(cmd, cwd=cp_dir, stdout=stdout, stderr=stderr, text=True)
+    for _ in range(120):
+        if process.poll() is not None:
+            stdout.close()
+            stderr.close()
+            raise RuntimeError(
+                f"Serveur CrossingTraffic arrêté avec code {process.returncode}; "
+                f"voir {stderr_path}"
+            )
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.4):
+                return process, stdout, stderr
+        except OSError:
+            time.sleep(0.5)
+    _cleanup_cp(process, None)
+    stdout.close()
+    stderr.close()
+    raise TimeoutError(f"Serveur CrossingTraffic indisponible; voir {stderr_path}")
+
+
+def _run_crossingtraffic(args, current_seed: int, run_dir: str,
+                         log_file: str, logger: logging.Logger):
+    """Run q-none or q-cp-etr on CrossingTraffic."""
+    from crossingtraffic.crossingtraffic_environment import CrossingTrafficEnv
+
+    if args.agent != "q":
+        raise ValueError("CrossingTraffic supporte uniquement --agent q.")
+    if args.shaping not in ("none", "cp-etr"):
+        raise ValueError("CrossingTraffic supporte uniquement --shaping none ou cp-etr.")
+    if args.reward_mode != "original":
+        raise ValueError("--reward-mode est réservé à Navigation.")
+    if args.budget != 0:
+        raise ValueError("CrossingTraffic ne supporte pas --budget.")
+    if args.episodes <= 0 or args.bp_iter <= 0 or not math.isfinite(args.alpha):
+        raise ValueError("Paramètres CrossingTraffic invalides.")
+
+    java_process = None
+    cp_client = None
+    log_streams = []
+    try:
+        if args.shaping == "cp-etr":
+            from crossingtraffic.crossingtraffic_cp_etr import (
+                CrossingTrafficCPClient, CrossingTrafficCPEnv,
+            )
+            project_dir = os.path.dirname(os.path.abspath(__file__))
+            cp_dir = os.path.join(project_dir, "MiniCPBP")
+            cp_port = args.port if args.port is not None else 12346
+            if not 1 <= cp_port <= 65535:
+                raise ValueError("--port doit être compris entre 1 et 65535.")
+            java_process, *log_streams = _start_crossingtraffic_cp_server(
+                cp_dir, cp_port, args.bp_iter, run_dir,
+            )
+            cp_client = CrossingTrafficCPClient(port=cp_port)
+            cp_client.connect(str(args.instance))
+            env = CrossingTrafficCPEnv(
+                instance_id=str(args.instance), client=cp_client,
+                alpha=args.alpha, gamma=config.DISCOUNT_FACTOR,
+            )
+        else:
+            env = CrossingTrafficEnv(instance_id=str(args.instance))
+
+        env.reset(seed=current_seed)
+        env.action_space.seed(current_seed)
+        metadata = {
+            "instance_id": f"crossingtraffic_{args.instance}",
+            "max_steps": env.horizon,
+            "python_horizon": env.horizon,
+            "cp_nb_steps": env.cp_nb_steps,
+            "alpha": args.alpha,
+            "bp_iter": args.bp_iter,
+            "size": None,
+            "holes": [],
+            "goal": env.goal_state_idx,
+        }
+        vprint(
+            f"Instance CrossingTraffic '{args.instance}' | Agent: q | "
+            f"Shaping: {args.shaping} | Seed: {current_seed}",
+            args.verbose, min_level=1, logger=logger,
+        )
+        train_fn = lambda e, episodes, max_steps: q_learning_standard.train_q_learning(
+            e, episodes, max_steps,
+            metadata["size"], metadata["holes"], metadata["goal"],
+            args.shaping, metadata["instance_id"],
+            verbose=args.verbose, run_dir=run_dir, logger=logger,
+        )
+        _run_q_learning_session(
+            env, train_fn, args, metadata["max_steps"], log_file,
+            java_process=java_process, cp_client=cp_client,
+            size=None, holes=[], goal=metadata["goal"],
+            verbose=args.verbose, run_dir=run_dir, logger=logger,
+            result_metadata={
+                "domain": "crossingtraffic",
+                "alpha": args.alpha,
+                "bp_iter": args.bp_iter,
+                "python_horizon": metadata["python_horizon"],
+                "cp_nb_steps": metadata["cp_nb_steps"],
+            },
+        )
+    finally:
+        if cp_client is not None:
+            cp_client.close()
+        if java_process is not None:
+            _cleanup_cp(java_process, None)
+        for stream in log_streams:
+            stream.close()
+        if "env" in locals():
+            env.close()
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Train/Evaluate FrozenLake or Navigation agents.")
-    parser.add_argument('--domain', choices=['frozenlake', 'navigation'], default='frozenlake')
+    parser = argparse.ArgumentParser(description="Train/Evaluate FrozenLake, Navigation or CrossingTraffic agents.")
+    parser.add_argument('--domain', choices=['frozenlake', 'navigation', 'crossingtraffic'], default='frozenlake')
     parser.add_argument('--instance', type=str, required=True, help="Instance ID for the selected domain")
     parser.add_argument('--agent', type=str, choices=['q', 'optimal', 'cp_greedy'], default='q', help="Agent type")
     parser.add_argument('--shaping', type=str, choices=['none', 'classic', 'cp-ms', 'cp-etr'],
@@ -241,15 +386,15 @@ def main():
     parser.add_argument('--episodes', type=int, default=500, help="Training episodes for Q-learning")
     parser.add_argument('--seed', type=int, default=None, help="Random seed to override config.seed_value")
     parser.add_argument('--port', type=int, default=None,
-                        help="TCP port for the Java CP server (FrozenLake: 12345, Navigation: 12350)")
+                        help="TCP port for the Java CP server (FrozenLake: 12345, Navigation: 12350, CrossingTraffic: 12346)")
     parser.add_argument('--no-compile', action='store_true',
                         help="Skip 'mvn compile' step (use when Java is already compiled)")
     parser.add_argument('--cp-nbsteps-override', type=int, default=-1,
                         help="Override cp_nbSteps for the Java CP server (-1 = use instances.json value)")
     parser.add_argument('--alpha', type=float, default=config.CP_ETR_SHAPING_COEFF,
-                        help="Navigation CP-ETR shaping coefficient")
+                        help="CP-ETR shaping coefficient")
     parser.add_argument('--bp-iter', type=int, default=1,
-                        help="Navigation CP belief-propagation iterations")
+                        help="CP server belief-propagation iterations")
     parser.add_argument('--results-dir', type=str, default=None,
                         help="Dossier racine où écrire les résultats (default: results/)")
     parser.add_argument('--verbose', type=int, choices=[0, 1, 2], default=0,
@@ -268,6 +413,24 @@ def main():
     random.seed(current_seed)
     np.random.seed(current_seed)
     args.seed = current_seed
+
+    if args.domain == "crossingtraffic":
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_name = (
+            f"q_{args.shaping}_crossingtraffic_{args.instance}_"
+            f"{args.episodes}eps_seed{current_seed}_{timestamp}"
+        )
+        results_base = args.results_dir if args.results_dir is not None else "results"
+        run_dir = os.path.join(results_base, run_name)
+        os.makedirs(run_dir, exist_ok=True)
+        log_file = os.path.join(run_dir, "result.json")
+        logger = _setup_logging(args.verbose, run_dir)
+        try:
+            _run_crossingtraffic(args, current_seed, run_dir, log_file, logger)
+        except (FileNotFoundError, RuntimeError, ValueError, TimeoutError) as err:
+            tqdm.write(f"ERROR CrossingTraffic: {err}")
+            raise
+        return
 
     if args.domain == "navigation":
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -509,7 +672,7 @@ def _run_q_learning_session(env, train_fn, args, max_steps_config, log_file,
             q_table, episodes, evaluations = result
     except Exception as e:
         tqdm.write(f"ERROR during training: {e}")
-        if args.domain == "navigation":
+        if args.domain in ("navigation", "crossingtraffic"):
             raise
         import traceback
         traceback.print_exc()
