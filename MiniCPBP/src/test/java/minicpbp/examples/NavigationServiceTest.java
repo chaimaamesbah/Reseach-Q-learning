@@ -11,6 +11,7 @@ public class NavigationServiceTest {
 
     @Test
     public void rewardMatrixMatchesRddlCurrentStateReward() throws Exception {
+        setRewardMode("original");
         Field goal = NavigationService.class.getDeclaredField("goalPosIdx");
         goal.setAccessible(true);
         goal.setInt(null, 2);
@@ -26,5 +27,30 @@ public class NavigationServiceTest {
         assertEquals(0, rewards[2][0][2]);
         // The dead state remains penalized.
         assertEquals(-1, rewards[3][0][3]);
+    }
+
+    @Test
+    public void frozenLakeRewardMatrixRewardsOnlyEnteringGoal() throws Exception {
+        setRewardMode("frozenlake");
+        Field goal = NavigationService.class.getDeclaredField("goalPosIdx");
+        goal.setAccessible(true);
+        goal.setInt(null, 2);
+
+        Method builder = NavigationService.class.getDeclaredMethod(
+            "buildRewardMatrix", int.class);
+        builder.setAccessible(true);
+        int[][][] rewards = (int[][][]) builder.invoke(null, 4);
+
+        assertEquals(1, rewards[0][0][2]);
+        assertEquals(0, rewards[0][0][0]);
+        assertEquals(0, rewards[0][0][3]);
+        assertEquals(0, rewards[2][0][2]);
+        assertEquals(0, rewards[3][0][3]);
+    }
+
+    private static void setRewardMode(String mode) throws Exception {
+        Field rewardMode = NavigationService.class.getDeclaredField("rewardMode");
+        rewardMode.setAccessible(true);
+        rewardMode.set(null, mode);
     }
 }

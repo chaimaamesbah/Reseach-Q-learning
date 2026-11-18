@@ -36,7 +36,8 @@ import org.json.JSONException;
  *
  * Transitions are deterministic for movement (bounded by grid edges), with a
  * Bernoulli(P(xi,yj)) disappearance probability on the destination cell.
- * DEAD and GOAL (goalPosIdx) are absorbing states. GOAL gives reward 0; all others -1.
+ * DEAD and GOAL (goalPosIdx) are absorbing states. The reward mode defaults to
+ * the RDDL reward and can be selected with -Dnavigation.reward-mode=frozenlake.
  *
  * Default port: 12350
  */
@@ -64,12 +65,26 @@ public class NavigationService {
     private static JSONObject allInstancesConfig = null;
     private static String     currentInstanceId  = null;
     private static int        BP_ITERATIONS      = 1;
+    private static String     rewardMode         = "original";
+
+    private static void configureRewardModeFromProperty() {
+        String rewardProp = System.getProperty("navigation.reward-mode", "original");
+        rewardProp = rewardProp.trim().toLowerCase(Locale.ROOT);
+        if (rewardProp.equals("original") || rewardProp.equals("frozenlake")) {
+            rewardMode = rewardProp;
+        } else {
+            System.err.println("WARN: invalid navigation.reward-mode '" + rewardProp
+                + "', using original");
+            rewardMode = "original";
+        }
+    }
 
     // -------------------------------------------------------------------------
     // Entry point
     // -------------------------------------------------------------------------
 
     public static void main(String[] args) throws Exception {
+        configureRewardModeFromProperty();
         // Sub-command: export <instance_id> [outdir]
         if (args.length > 0 && args[0].equalsIgnoreCase("export")) {
             runExport(args);
@@ -90,7 +105,7 @@ public class NavigationService {
             }
         }
         System.out.println("Navigation CP Server starting on port " + PORT
-            + " (bp.iterations=" + BP_ITERATIONS + ")");
+            + " (bp.iterations=" + BP_ITERATIONS + ", reward-mode=" + rewardMode + ")");
 
         if (!loadAllInstancesConfig()) {
             System.err.println("FATAL: could not load '" + INSTANCES_JSON_FILE + "'");
@@ -272,7 +287,11 @@ public class NavigationService {
             cp = makeSolver();
             action      = makeIntVarArray(cp, nbSteps, NB_ACTIONS);
             state       = makeIntVarArray(cp, nbSteps, nbStates);
-            totalReward = makeIntVar(cp, -nbSteps, 0);
+            if (isFrozenLakeRewardMode()) {
+                totalReward = makeIntVar(cp, 0, nbSteps);
+            } else {
+                totalReward = makeIntVar(cp, -nbSteps, 0);
+            }
 
             double[][][] P = buildTransitionMatrix(nbStates);
             int[][][]    R = buildRewardMatrix(nbStates);
@@ -336,11 +355,11 @@ public class NavigationService {
             System.err.println("ETR at step " + currentStep + " = " + etr);
             return "ETR_VALUE " + etr;
         } catch (InconsistencyException e) {
-            System.err.println("WARN: inconsistency during QUERY_ETR");
-            return "ETR_VALUE 0.0";
+           System.err.println("ERROR: inconsistency during QUERY_ETR");
+           return "ERROR QUERY_ETR inconsistency";
         } catch (Exception e) {
             System.err.println("ERROR during QUERY_ETR: " + e.getMessage());
-            return "ETR_VALUE 0.0";
+            return "ERROR QUERY_ETR failed: " + e.getMessage();
         }
     }
 
@@ -409,21 +428,29 @@ public class NavigationService {
     }
 
     /**
-     * Reward from the Navigation RDDL model: -1 while the current state is
-     * not the goal (including the dead state), and 0 in the absorbing goal.
-     * The RDDL reward is evaluated on the current state, before the transition.
+     * Builds the reward matrix used by the CP model. The original mode mirrors
+     * Navigation RDDL: -1 while the source state is not the goal and 0 at the
+     * absorbing goal. The FrozenLake mode gives +1 only on the first transition
+     * entering the goal; all other transitions give 0.
      */
     private static int[][][] buildRewardMatrix(int nbStates) {
         int[][][] R = new int[nbStates][NB_ACTIONS][nbStates];
         for (int s = 0; s < nbStates; s++) {
             for (int a = 0; a < NB_ACTIONS; a++) {
-                int reward = (s == goalPosIdx) ? 0 : -1;
                 for (int ns = 0; ns < nbStates; ns++) {
-                    R[s][a][ns] = reward;
+                    if (isFrozenLakeRewardMode()) {
+                        R[s][a][ns] = (s != goalPosIdx && ns == goalPosIdx) ? 1 : 0;
+                    } else {
+                        R[s][a][ns] = (s == goalPosIdx) ? 0 : -1;
+                    }
                 }
             }
         }
         return R;
+    }
+
+    private static boolean isFrozenLakeRewardMode() {
+        return "frozenlake".equals(rewardMode);
     }
 
     // -------------------------------------------------------------------------
@@ -530,6 +557,7 @@ public class NavigationService {
         currentInstanceId  = null;
         nX = nY = goalPosIdx = deadStatIdx = initStatIdx = nbSteps = -1;
         P_grid = null;
+        rewardMode = "original";
         cp = null; action = null; state = null; totalReward = null;
         currentStep = 0;
     }

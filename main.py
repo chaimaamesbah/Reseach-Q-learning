@@ -46,7 +46,10 @@ def vprint(msg: str, verbose: int, min_level: int = 1, logger: logging.Logger = 
         logger.info(msg)
 
 
-def _start_navigation_cp_server(cp_dir: str, port: int, bp_iter: int, run_dir: str):
+def _start_navigation_cp_server(
+    cp_dir: str, port: int, bp_iter: int, run_dir: str,
+    reward_mode: str = "original"
+):
 
     metadata_source = os.path.join(
         os.path.dirname(os.path.abspath(__file__)),
@@ -80,6 +83,7 @@ def _start_navigation_cp_server(cp_dir: str, port: int, bp_iter: int, run_dir: s
     cmd = [
         "java",
         f"-Dbp.iterations={bp_iter}",
+        f"-Dnavigation.reward-mode={reward_mode}",
         "-cp",
         jar_path,
         "minicpbp.examples.NavigationService",
@@ -113,11 +117,14 @@ def _start_navigation_cp_server(cp_dir: str, port: int, bp_iter: int, run_dir: s
 def _run_navigation(args, current_seed: int, run_dir: str, log_file: str, logger: logging.Logger):
     """Run standard or CP-ETR Q-learning on the Navigation RDDL environment."""
     from navigation.navigation_environment import NavigationEnv
+    reward_mode = getattr(args, "reward_mode", "original")
 
     if args.agent != "q":
         raise ValueError("Navigation supporte uniquement --agent q.")
     if args.shaping not in ("none", "cp-etr"):
         raise ValueError("Navigation supporte uniquement --shaping none ou cp-etr.")
+    if reward_mode not in ("original", "frozenlake"):
+        raise ValueError("--reward-mode doit être original ou frozenlake.")
     if args.budget != 0:
         raise ValueError("--budget n'est pas supporte pour Navigation.")
     if args.episodes <= 0:
@@ -136,14 +143,13 @@ def _run_navigation(args, current_seed: int, run_dir: str, log_file: str, logger
 
             project_dir = os.path.dirname(os.path.abspath(__file__))
             cp_dir = os.path.join(project_dir, "MiniCPBP")
-            if not os.path.isfile(os.path.join(cp_dir, "pom.xml")):
-                raise FileNotFoundError(f"pom.xml not found in {cp_dir}")
 
             cp_port = args.port if args.port is not None else 12350
             if not 1 <= cp_port <= 65535:
                 raise ValueError("--port doit etre compris entre 1 et 65535.")
             java_process, *log_streams = _start_navigation_cp_server(
-                cp_dir, cp_port, args.bp_iter, run_dir
+                cp_dir, cp_port, args.bp_iter, run_dir,
+                reward_mode=reward_mode,
             )
             cp_client = NavigationCPClient(port=cp_port)
             if not cp_client.connect(str(args.instance)):
@@ -153,22 +159,30 @@ def _run_navigation(args, current_seed: int, run_dir: str, log_file: str, logger
                 client=cp_client,
                 alpha=args.alpha,
                 gamma=config.DISCOUNT_FACTOR,
+                reward_mode=reward_mode,
             )
         else:
-            env = NavigationEnv(instance_id=str(args.instance))
+            env = NavigationEnv(
+                instance_id=str(args.instance), reward_mode=reward_mode
+            )
 
         env.reset(seed=current_seed)
         env.action_space.seed(current_seed)
         metadata = {
             "instance_id": f"navigation_{args.instance}",
             "max_steps": env.horizon,
+            "python_horizon": env.horizon,
+            "cp_nb_steps": env.cp_nb_steps,
+            "alpha": args.alpha,
+            "bp_iter": args.bp_iter,
             "size": None,
             "holes": [],
             "goal": env.goal_state_idx,
+            "reward_mode": reward_mode,
         }
         vprint(
             f"Instance Navigation '{args.instance}' | Agent: q | "
-            f"Shaping: {args.shaping} | Seed: {current_seed}",
+            f"Shaping: {args.shaping} | Reward: {reward_mode} | Seed: {current_seed}",
             args.verbose,
             min_level=1,
             logger=logger,
@@ -184,6 +198,14 @@ def _run_navigation(args, current_seed: int, run_dir: str, log_file: str, logger
             java_process=java_process, cp_client=cp_client,
             size=None, holes=[], goal=metadata["goal"],
             verbose=args.verbose, run_dir=run_dir, logger=logger,
+            result_metadata={
+                "domain": "navigation",
+                "reward_mode": reward_mode,
+                "alpha": args.alpha,
+                "bp_iter": args.bp_iter,
+                "python_horizon": metadata["python_horizon"],
+                "cp_nb_steps": metadata["cp_nb_steps"],
+            },
         )
     finally:
         if cp_client is not None:
@@ -203,6 +225,9 @@ def main():
     parser.add_argument('--agent', type=str, choices=['q', 'optimal', 'cp_greedy'], default='q', help="Agent type")
     parser.add_argument('--shaping', type=str, choices=['none', 'classic', 'cp-ms', 'cp-etr'],
                         default='none', help="Reward shaping for Q-learning")
+    parser.add_argument('--reward-mode', choices=['original', 'frozenlake'],
+                        default='original',
+                        help="Navigation reward mode (default: original)")
     parser.add_argument('--budget', type=int, default=0,
                         help="Max no-slip actions per episode (0 = no budget constraint)")
     parser.add_argument('--noslip-strategy', type=str,
@@ -246,7 +271,10 @@ def main():
 
     if args.domain == "navigation":
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        run_name = f"q_{args.shaping}_navigation_{args.instance}_{args.episodes}eps_seed{current_seed}_{timestamp}"
+        run_name = (
+            f"q_{args.shaping}_navigation_{args.instance}_reward-{args.reward_mode}_"
+            f"{args.episodes}eps_seed{current_seed}_{timestamp}"
+        )
         results_base = args.results_dir if args.results_dir is not None else "results"
         run_dir = os.path.join(results_base, run_name)
         os.makedirs(run_dir, exist_ok=True)
@@ -257,6 +285,10 @@ def main():
         except (FileNotFoundError, RuntimeError, ValueError, TimeoutError) as err:
             tqdm.write(f"ERROR Navigation: {err}")
             raise
+        return
+
+    if args.reward_mode != "original":
+        tqdm.write("ERROR: --reward-mode frozenlake est réservé au domaine Navigation.")
         return
 
     if args.port is None:
@@ -462,7 +494,8 @@ def _run_q_learning_session(env, train_fn, args, max_steps_config, log_file,
                             java_process=None, cp_client=None,
                             java_stdout_log=None, java_stderr_log=None,
                             size=None, holes=None, goal=None,
-                            verbose=0, run_dir=None, logger=None):
+                            verbose=0, run_dir=None, logger=None,
+                            result_metadata=None):
     q_table, episodes, evaluations, aug_mapper = None, [], [], None
     start_time = time.time()
     try:
@@ -490,7 +523,10 @@ def _run_q_learning_session(env, train_fn, args, max_steps_config, log_file,
         return
 
     try:
-        utils.save_results_log({'episode_log': episodes, 'evaluation_log': evaluations}, log_file)
+        result = {'episode_log': episodes, 'evaluation_log': evaluations}
+        if result_metadata:
+            result.update(result_metadata)
+        utils.save_results_log(result, log_file)
     except Exception as e:
         tqdm.write(f"Error saving results log: {e}")
 

@@ -30,9 +30,10 @@ Methods:
     cp-greedy   CP-MS greedy agent (no Q-learning)
 
 Cache:
-    After each successful run, the script writes a compact JSON to
-    experiment_results/cache/{inst}_{method}_seed{seed}_{episodes}eps.json
-    containing the eval_log, episode_log, final_sr and final_dr.
+    After each successful run, the script writes a compact JSON to a cache path
+    that includes the domain, reward mode, shaping parameters and Navigation
+    horizons, so incompatible variants never share data. It contains the
+    evaluation logs and the parameters used for the run.
     The results/ folder written by main.py is never read for skip logic.
 """
 
@@ -168,27 +169,122 @@ def _method_color(raw: str, extra_iter) -> str:
 # Cache helpers  (experiment_results/cache/ — never touches results/)
 # ---------------------------------------------------------------------------
 
-def _cache_path(output_dir: Path, inst: str, meth: str, seed: int, episodes: int) -> Path:
+def _navigation_horizons(inst: str) -> tuple[int | None, int | None]:
+    """Return the Python and CP horizons recorded for a Navigation instance."""
+    metadata_path = ROOT / "navigation" / "navigation_mdp_ippc2011.json"
+    try:
+        with metadata_path.open(encoding="utf-8") as f:
+            data = json.load(f)
+        instance = data[str(inst)]
+        return int(instance["horizon"]), int(instance["cp_nbSteps"])
+    except (FileNotFoundError, KeyError, TypeError, ValueError):
+        return None, None
+
+
+def _cache_parameters(inst: str, domain: str, alpha: float,
+                      bp_iter: int, python_horizon: int | None = None,
+                      cp_nb_steps: int | None = None) -> tuple:
+    """Normalize every experiment parameter that affects a cached result."""
+    if domain == "navigation" and (python_horizon is None or cp_nb_steps is None):
+        json_horizon, json_cp_steps = _navigation_horizons(inst)
+        python_horizon = json_horizon if python_horizon is None else python_horizon
+        cp_nb_steps = json_cp_steps if cp_nb_steps is None else cp_nb_steps
+    return (
+        float(alpha),
+        int(bp_iter),
+        None if python_horizon is None else int(python_horizon),
+        None if cp_nb_steps is None else int(cp_nb_steps),
+    )
+
+
+def _cache_token(value) -> str:
+    """Create a filesystem-safe, stable token for a cache parameter."""
+    if value is None:
+        return "na"
+    if isinstance(value, float):
+        token = format(value, ".12g")
+    else:
+        token = str(value)
+    return token.replace("-", "m").replace("+", "p").replace(".", "p")
+
+def _cache_path(output_dir: Path, inst: str, meth: str, seed: int, episodes: int,
+                reward_mode: str = "original",
+                domain: str = "frozenlake",
+                alpha: float = config.CP_ETR_SHAPING_COEFF,
+                bp_iter: int = 1,
+                python_horizon: int | None = None,
+                cp_nb_steps: int | None = None) -> Path:
+    alpha, bp_iter, python_horizon, cp_nb_steps = _cache_parameters(
+        inst, domain, alpha, bp_iter, python_horizon, cp_nb_steps
+    )
     safe_meth = meth.replace(":", "-")
-    return output_dir / "cache" / f"{inst}_{safe_meth}_seed{seed}_{episodes}eps.json"
+    return output_dir / "cache" / (
+        f"{domain}_{inst}_{safe_meth}_reward-{reward_mode}_"
+        f"a{_cache_token(alpha)}_bp{bp_iter}_h{_cache_token(python_horizon)}_"
+        f"cp{_cache_token(cp_nb_steps)}_seed{seed}_{episodes}eps.json"
+    )
 
 
 def _load_cache(output_dir: Path, inst: str, meth: str, seed: int,
-                episodes: int) -> dict | None:
-    p = _cache_path(output_dir, inst, meth, seed, episodes)
+                episodes: int, reward_mode: str = "original",
+                domain: str = "frozenlake",
+                alpha: float = config.CP_ETR_SHAPING_COEFF,
+                bp_iter: int = 1,
+                python_horizon: int | None = None,
+                cp_nb_steps: int | None = None) -> dict | None:
+    alpha, bp_iter, python_horizon, cp_nb_steps = _cache_parameters(
+        inst, domain, alpha, bp_iter, python_horizon, cp_nb_steps
+    )
+    p = _cache_path(
+        output_dir, inst, meth, seed, episodes, reward_mode, domain,
+        alpha, bp_iter, python_horizon, cp_nb_steps,
+    )
     if not p.exists():
         return None
     try:
         with open(p) as f:
-            return json.load(f)
+            entry = json.load(f)
+            # Old entries without an explicit mode are intentionally ignored;
+            # they cannot be proven to match the current reward semantics.
+            expected = {
+                "reward_mode": reward_mode,
+                "domain": domain,
+                "alpha": alpha,
+                "bp_iter": bp_iter,
+                "python_horizon": python_horizon,
+                "cp_nb_steps": cp_nb_steps,
+            }
+            if any(entry.get(key) != value for key, value in expected.items()):
+                return None
+            return entry
     except Exception as e:
         print(f"  [WARN] Corrupt cache entry {p.name}: {e} — will re-run")
         return None
 
 
 def _save_cache(output_dir: Path, inst: str, meth: str, seed: int,
-                episodes: int, entry: dict) -> None:
-    p = _cache_path(output_dir, inst, meth, seed, episodes)
+                episodes: int, entry: dict, reward_mode: str = "original",
+                domain: str = "frozenlake",
+                alpha: float = config.CP_ETR_SHAPING_COEFF,
+                bp_iter: int = 1,
+                python_horizon: int | None = None,
+                cp_nb_steps: int | None = None) -> None:
+    alpha, bp_iter, python_horizon, cp_nb_steps = _cache_parameters(
+        inst, domain, alpha, bp_iter, python_horizon, cp_nb_steps
+    )
+    p = _cache_path(
+        output_dir, inst, meth, seed, episodes, reward_mode, domain,
+        alpha, bp_iter, python_horizon, cp_nb_steps,
+    )
+    entry = dict(entry)
+    entry.update({
+        "domain": domain,
+        "reward_mode": reward_mode,
+        "alpha": alpha,
+        "bp_iter": bp_iter,
+        "python_horizon": python_horizon,
+        "cp_nb_steps": cp_nb_steps,
+    })
     p.parent.mkdir(parents=True, exist_ok=True)
     with open(p, "w") as f:
         json.dump(entry, f, indent=2)
@@ -198,17 +294,32 @@ def _save_cache(output_dir: Path, inst: str, meth: str, seed: int,
 # Result extraction helpers
 # ---------------------------------------------------------------------------
 
-def _extract_entry(log: dict, domain: str = "frozenlake") -> dict | None:
+def _extract_entry(log: dict, domain: str = "frozenlake",
+                   reward_mode: str = "original",
+                   alpha: float = config.CP_ETR_SHAPING_COEFF,
+                   bp_iter: int = 1,
+                   python_horizon: int | None = None,
+                   cp_nb_steps: int | None = None) -> dict | None:
     """Pull the fields we care about out of a main.py result JSON."""
     eval_log = log.get("evaluation_log", [])
     if not eval_log:
         return None
     last = eval_log[-1]
+    alpha, bp_iter, python_horizon, cp_nb_steps = _cache_parameters(
+        log.get("instance_id", ""), domain, alpha, bp_iter,
+        python_horizon, cp_nb_steps,
+    )
     return {
         "eval_log": eval_log,
         "episode_log": log.get("episode_log", []),
         "final_sr": last.get("eval_success_rate", float("nan")),
         "final_dr": last.get("eval_avg_discounted_return", float("nan")),
+        "domain": domain,
+        "reward_mode": reward_mode,
+        "alpha": alpha,
+        "bp_iter": bp_iter,
+        "python_horizon": python_horizon,
+        "cp_nb_steps": cp_nb_steps,
     }
 
 
@@ -236,7 +347,8 @@ def _budget_stage_changes(meth: str, episodes: int) -> list[int]:
 def _build_cmd(meth: str, inst: str, episodes: int, seed: int, tmp_dir: str,
                domain: str = "frozenlake", alpha: float = config.CP_ETR_SHAPING_COEFF,
                bp_iter: int = 1, port: int = 12345,
-               no_compile: bool = False) -> list[str]:
+               no_compile: bool = False,
+               reward_mode: str = "original") -> list[str]:
     base, budget, strategy = _parse_method(meth)
     agent, shaping = METHOD_ARGS[base]
     cmd = [
@@ -254,6 +366,8 @@ def _build_cmd(meth: str, inst: str, episodes: int, seed: int, tmp_dir: str,
         cmd += ["--shaping", shaping]
     if domain == "navigation" and shaping == "cp-etr":
         cmd += ["--alpha", str(alpha), "--bp-iter", str(bp_iter)]
+    if domain == "navigation":
+        cmd += ["--reward-mode", reward_mode]
     if budget:
         cmd += ["--budget", str(budget)]
     if strategy:
@@ -274,6 +388,7 @@ def _run_one(inst: str, meth: str, seed: int, episodes: int,
              domain: str = "frozenlake", alpha: float = config.CP_ETR_SHAPING_COEFF,
              bp_iter: int = 1,
              port: int = 12345, no_compile: bool = False,
+             reward_mode: str = "original",
              progress_bar: "tqdm | None" = None) -> tuple[tuple, dict | None]:
     """Execute a single (inst, meth, seed) run and return ((inst, meth, seed), entry)."""
     tmp_dir = tempfile.mkdtemp(prefix="fl_run_")
@@ -286,9 +401,13 @@ def _run_one(inst: str, meth: str, seed: int, episodes: int,
         return (inst, meth, seed), entry
 
     try:
+        _, _, python_horizon, cp_nb_steps = _cache_parameters(
+            inst, domain, alpha, bp_iter
+        )
         cmd = _build_cmd(
             meth, inst, episodes, seed, tmp_dir, domain=domain,
             alpha=alpha, bp_iter=bp_iter, port=port, no_compile=no_compile,
+            reward_mode=reward_mode,
         )
         result = subprocess.run(
             cmd, cwd=str(ROOT), capture_output=True, text=True, timeout=None,
@@ -305,11 +424,20 @@ def _run_one(inst: str, meth: str, seed: int, episodes: int,
         with open(result_files[0]) as f:
             raw = json.load(f)
 
-        entry = _extract_entry(raw, domain=domain)
+        entry = _extract_entry(
+            raw, domain=domain, reward_mode=reward_mode,
+            alpha=alpha, bp_iter=bp_iter,
+            python_horizon=python_horizon, cp_nb_steps=cp_nb_steps,
+        )
         if entry is None:
             return _done(f"  [WARN]  {tag} — result log has no evaluation_log", None)
 
-        _save_cache(output_dir, inst, meth, seed, episodes, entry)
+        _save_cache(
+            output_dir, inst, meth, seed, episodes, entry,
+            reward_mode=reward_mode, domain=domain,
+            alpha=alpha, bp_iter=bp_iter,
+            python_horizon=python_horizon, cp_nb_steps=cp_nb_steps,
+        )
         return _done(f"  [OK]    {tag}", entry)
 
     except Exception as exc:
@@ -369,7 +497,8 @@ def _precompile_java(print_lock: threading.Lock) -> bool:
 def run_all(instances, methods, seeds, episodes, output_dir, force,
             domain: str = "frozenlake", alpha: float = config.CP_ETR_SHAPING_COEFF,
             bp_iter: int = 1, workers: int = 1,
-            base_port: int = 12345) -> dict:
+            base_port: int = 12345,
+            reward_mode: str = "original") -> dict:
     """
     Launch main.py for each (instance, method, seed) not already cached.
 
@@ -396,7 +525,10 @@ def run_all(instances, methods, seeds, episodes, output_dir, force,
     # Pre-compile Java once if workers > 1 and Java methods are present
     needs_java = any(_parse_method(m)[0] in JAVA_METHODS for m in methods)
     no_compile = False
-    if workers > 1 and needs_java:
+    # Navigation always uses the precompiled shaded JAR directly; do not
+    # trigger Maven during a Narval experiment. FrozenLake keeps its existing
+    # pre-compilation path for parallel Java methods.
+    if workers > 1 and needs_java and domain != "navigation":
         if not _precompile_java(print_lock):
             print("[WARN] Pre-compile failed; workers will each compile (may conflict).")
         else:
@@ -413,7 +545,11 @@ def run_all(instances, methods, seeds, episodes, output_dir, force,
     pending = []
     for idx, (inst, meth, seed) in enumerate(runs, 1):
         tag = f"[{idx:{w}}/{total}] {inst:<10} {meth:<16} seed={seed}"
-        cached = _load_cache(output_dir, inst, meth, seed, episodes)
+        cached = _load_cache(
+            output_dir, inst, meth, seed, episodes,
+            reward_mode=reward_mode, domain=domain,
+            alpha=alpha, bp_iter=bp_iter,
+        )
         if cached is not None and not force:
             tqdm.write(f"{tag}  --> SKIP  (cached)")
             data[(inst, meth, seed)] = cached
@@ -433,7 +569,8 @@ def run_all(instances, methods, seeds, episodes, output_dir, force,
                 return _run_one(
                     inst, meth, seed, episodes, output_dir, tag, print_lock,
                     domain=domain, alpha=alpha, bp_iter=bp_iter,
-                    port=port, no_compile=no_compile, progress_bar=pbar,
+                    port=port, no_compile=no_compile, reward_mode=reward_mode,
+                    progress_bar=pbar,
                 )
             finally:
                 port_pool.put(port)
@@ -441,7 +578,7 @@ def run_all(instances, methods, seeds, episodes, output_dir, force,
             return _run_one(
                 inst, meth, seed, episodes, output_dir, tag, print_lock,
                 domain=domain, alpha=alpha, bp_iter=bp_iter,
-                progress_bar=pbar,
+                reward_mode=reward_mode, progress_bar=pbar,
             )
 
     if pending and workers > 1:
@@ -482,12 +619,20 @@ def run_all(instances, methods, seeds, episodes, output_dir, force,
 # Load data from cache only (--plots-only)
 # ---------------------------------------------------------------------------
 
-def load_from_cache(instances, methods, seeds, episodes, output_dir) -> dict:
+def load_from_cache(instances, methods, seeds, episodes, output_dir,
+                    reward_mode: str = "original",
+                    domain: str = "frozenlake",
+                    alpha: float = config.CP_ETR_SHAPING_COEFF,
+                    bp_iter: int = 1) -> dict:
     data: dict[tuple, dict | None] = {}
     for inst in instances:
         for meth in methods:
             for seed in seeds:
-                data[(inst, meth, seed)] = _load_cache(output_dir, inst, meth, seed, episodes)
+                data[(inst, meth, seed)] = _load_cache(
+                    output_dir, inst, meth, seed, episodes,
+                    reward_mode=reward_mode, domain=domain,
+                    alpha=alpha, bp_iter=bp_iter,
+                )
     found = sum(1 for v in data.values() if v is not None)
     print(f"Found {found} cache entries.\n")
     return data
@@ -497,7 +642,9 @@ def load_from_cache(instances, methods, seeds, episodes, output_dir) -> dict:
 # Summary table
 # ---------------------------------------------------------------------------
 
-def make_summary_table(data: dict, instances, methods, seeds, output_dir: Path) -> None:
+def make_summary_table(data: dict, instances, methods, seeds, output_dir: Path,
+                       domain: str = "frozenlake",
+                       reward_mode: str = "original") -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     summary: dict[tuple, dict | None] = {}
@@ -518,7 +665,10 @@ def make_summary_table(data: dict, instances, methods, seeds, output_dir: Path) 
             else:
                 summary[(inst, meth)] = None
 
-    csv_path = output_dir / "summary_table.csv"
+    table_suffix = "" if domain == "frozenlake" and reward_mode == "original" else (
+        f"_{domain}_reward-{reward_mode}"
+    )
+    csv_path = output_dir / f"summary_table{table_suffix}.csv"
     # Columns grouped by method: instance, m1_SR_mean, m1_SR_std, m1_DR_mean, m1_DR_std, m1_n, m2_...
     header = ["instance"]
     for m in methods:
@@ -569,7 +719,8 @@ def make_summary_table(data: dict, instances, methods, seeds, output_dir: Path) 
 # ---------------------------------------------------------------------------
 
 def make_learning_curves(data: dict, instances, methods, seeds, episodes: int,
-                         output_dir: Path, domain: str = "frozenlake") -> None:
+                         output_dir: Path, domain: str = "frozenlake",
+                         reward_mode: str = "original") -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     plt.style.use("seaborn-v0_8-darkgrid")
 
@@ -645,7 +796,7 @@ def make_learning_curves(data: dict, instances, methods, seeds, episodes: int,
 
         if has_data:
             ax.set_title(
-                f"Learning curves — Navigation — Instance {inst}"
+                f"Learning curves — Navigation ({reward_mode}) — Instance {inst}"
                 if domain == "navigation"
                 else f"Learning curves — {inst}",
                 fontsize=13, fontweight="bold",
@@ -656,7 +807,7 @@ def make_learning_curves(data: dict, instances, methods, seeds, episodes: int,
             ax.legend(fontsize=9)
             plt.tight_layout()
             out = (
-                output_dir / f"navigation_success_rate_{inst}.png"
+                output_dir / f"navigation_success_rate_{inst}_reward-{reward_mode}.png"
                 if domain == "navigation"
                 else output_dir / f"learning_curve_{inst}.png"
             )
@@ -711,7 +862,7 @@ def make_learning_curves(data: dict, instances, methods, seeds, episodes: int,
                 return_has_data = True
             if return_has_data:
                 return_ax.set_title(
-                    f"Learning curves — Navigation — Instance {inst}",
+                    f"Learning curves — Navigation ({reward_mode}) — Instance {inst}",
                     fontsize=13, fontweight="bold",
                 )
                 return_ax.set_xlabel("Timestep")
@@ -719,7 +870,9 @@ def make_learning_curves(data: dict, instances, methods, seeds, episodes: int,
                 return_ax.legend(fontsize=9)
                 return_ax.grid(alpha=0.3)
                 plt.tight_layout()
-                return_out = output_dir / f"navigation_episode_return_{inst}.png"
+                return_out = output_dir / (
+                    f"navigation_episode_return_{inst}_reward-{reward_mode}.png"
+                )
                 plt.savefig(return_out, dpi=150)
                 print(f"Navigation return curve saved: {return_out}")
             else:
@@ -741,6 +894,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--domain", choices=["frozenlake", "navigation"],
                         default="frozenlake",
                         help="Environment domain (default: frozenlake)")
+    parser.add_argument("--reward-mode", choices=["original", "frozenlake"],
+                        default="original",
+                        help="Navigation reward mode (default: original)")
     parser.add_argument("--seeds", type=int, default=DEFAULT_SEEDS,
                         help=f"Number of seeds to run (default: {DEFAULT_SEEDS})")
     parser.add_argument("--seed-start", type=int, default=1,
@@ -800,6 +956,9 @@ def main() -> None:
         if args.bp_iter < 1:
             print("[ERROR] --bp-iter doit etre >= 1.")
             sys.exit(1)
+    elif args.reward_mode != "original":
+        print("[ERROR] --reward-mode frozenlake est réservé au domaine Navigation.")
+        sys.exit(1)
     seeds = list(range(args.seed_start, args.seed_start + args.seeds))
 
     # Validate method strings early
@@ -823,18 +982,42 @@ def main() -> None:
             bp_iter=args.bp_iter,
             workers=args.workers,
             base_port=args.base_port,
+            reward_mode=args.reward_mode,
         )
     else:
         print("--plots-only: loading from cache …")
         data = load_from_cache(args.instances, args.methods, seeds,
-                               args.episodes, args.output_dir)
+                               args.episodes, args.output_dir,
+                               reward_mode=args.reward_mode,
+                               domain=args.domain,
+                               alpha=args.alpha,
+                               bp_iter=args.bp_iter)
 
     if not args.no_plots:
         make_summary_table(data, args.instances, args.methods, seeds,
-                           output_dir=args.output_dir)
+                           output_dir=args.output_dir, domain=args.domain,
+                           reward_mode=args.reward_mode)
         make_learning_curves(data, args.instances, args.methods, seeds,
                              episodes=args.episodes, output_dir=args.output_dir,
-                             domain=args.domain)
+                             domain=args.domain, reward_mode=args.reward_mode)
+
+    if not args.plots_only:
+        failed_runs = [
+            (inst, method, seed)
+            for inst in args.instances
+            for method in args.methods
+            for seed in seeds
+            if data.get((inst, method, seed)) is None
+        ]
+
+        if failed_runs:
+            print(
+                f"[ERROR] {len(failed_runs)} expérience(s) échouée(s).",
+                file=sys.stderr,
+            )
+            for run in failed_runs:
+                print(f"  {run}", file=sys.stderr)
+            sys.exit(1)
     print("All done.")
 
 

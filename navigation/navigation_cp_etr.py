@@ -87,14 +87,17 @@ class NavigationCPClient:
 class NavigationCPEnv(NavigationEnv):
     """Meme RDDL + meme Q-learning, mais la recompense d'entrainement est shapee.
 
+    ``reward_mode`` is forwarded to :class:`NavigationEnv`, so the CP model
+    and the Python environment use the same selected reward matrix.
     `set_evaluation_mode(True)` desactive CP pour mesurer la performance sur
-    la vraie recompense de l'environnement, comme pour Q sans CP.
+    la récompense sélectionnée de l'environnement, comme pour Q sans CP.
     """
 
     def __init__(self, instance_id: str, client: NavigationCPClient,
                  alpha: float = config.CP_ETR_SHAPING_COEFF,
-                 gamma: float = config.DISCOUNT_FACTOR):
-        super().__init__(instance_id=instance_id)
+                 gamma: float = config.DISCOUNT_FACTOR,
+                 reward_mode: str = "original"):
+        super().__init__(instance_id=instance_id, reward_mode=reward_mode)
         self.client = client
         self.alpha = alpha
         self.gamma = gamma
